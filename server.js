@@ -1,7 +1,7 @@
 // Passerelle Freightcom — Unique Plastique inc.
 // Détient la clé Freightcom (variable UPSTREAM_TOKEN sur Render) et expose la demande de tarifs
 // et la lecture des envois. L'achat d'étiquettes existe mais reste verrouillé tant que
-// ACHATS_ACTIVES n'est pas « oui » : une étiquette par commande, plafond quotidien, plafond de 25 $ (au-dessus : 10 % de la commande, 50 $ au plus).
+// ACHATS_ACTIVES n'est pas « oui » : une étiquette par commande, plafond quotidien, plafond de 15 $ (au-dessus : 10 % de la commande, 50 $ au plus).
 // La réservation de ramassage UPS/GLS reste verrouillée tant que RAMASSAGES_ACTIVES n'est pas « oui ».
 // GET /shipment/<id>/etiquette renvoie le PDF 4x6 de l'étiquette (lecture seulement).
 const http = require("http");
@@ -53,8 +53,8 @@ let compteurJour = { jour: "", n: 0 };
 // Plafond de prix : la passerelle retient les tarifs qu'elle a elle-même relayés (GET /rate/<id>)
 // et refuse tout achat dont le service n'a pas été vu, ou dont le prix dépasse MAX_PRIX_ETIQUETTE.
 // En cas de doute (prix illisible, service inconnu, tarif trop vieux), elle REFUSE.
-const MAX_PRIX = Math.min(25, Number(process.env.MAX_PRIX_ETIQUETTE || "25") || 0);  // jamais au-dessus de 25 $
-// Règle d'Alexandre (2026-10-23) : au-dessus de 25 $, l'étiquette est permise si elle vaut au plus 10 % de la commande
+const MAX_PRIX = Math.min(15, Number(process.env.MAX_PRIX_ETIQUETTE || "15") || 0);  // jamais au-dessus de 15 $ (décision d'Alexandre, 2026-10-23 19 h 21)
+// Règle d'Alexandre (2026-10-23) : au-dessus de 15 $, l'étiquette est permise si elle vaut au plus 10 % de la commande
 // (total TTC envoyé dans l'en-tête x-total-commande, en dollars), sans jamais dépasser MAX_PRIX_ABSOLU (défaut 50 $, 100 $ au plus).
 const PCT_COMMANDE = 0.10;
 const MAX_PRIX_ABSOLU = Math.min(100, Number(process.env.MAX_PRIX_ABSOLU || "50") || 0);
@@ -90,7 +90,7 @@ function verifierPrix(corps, totalCommande) {
   if (t.montant <= MAX_PRIX) return null;
   if (!(totalCommande > 0)) return `prix ${t.montant} $ au-dessus du plafond de ${MAX_PRIX} $ (total de la commande absent)`;
   const permis = Math.min(MAX_PRIX_ABSOLU, Math.round(totalCommande * PCT_COMMANDE * 100) / 100);
-  if (!(t.montant <= permis)) return `prix ${t.montant} $ au-dessus du plafond (25 $, ou 10 % de la commande de ${totalCommande} $ = ${permis} $, maximum ${MAX_PRIX_ABSOLU} $)`;
+  if (!(t.montant <= permis)) return `prix ${t.montant} $ au-dessus du plafond (${MAX_PRIX} $, ou 10 % de la commande de ${totalCommande} $ = ${permis} $, maximum ${MAX_PRIX_ABSOLU} $)`;
   return null;
 }
 const MAX_BODY = 64 * 1024;
