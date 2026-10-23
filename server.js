@@ -3,6 +3,7 @@
 // et la lecture des envois. L'achat d'étiquettes existe mais reste verrouillé tant que
 // ACHATS_ACTIVES n'est pas « oui » : une étiquette par commande, plafond quotidien, plafond de 25 $.
 // La réservation de ramassage UPS/GLS reste verrouillée tant que RAMASSAGES_ACTIVES n'est pas « oui ».
+// GET /shipment/<id>/etiquette renvoie le PDF 4x6 de l'étiquette (lecture seulement).
 const http = require("http");
 const crypto = require("crypto");
 
@@ -41,6 +42,7 @@ const ALLOW = [
   { m: ["GET"],  re: /^\/rate\/[A-Za-z0-9_-]{1,80}$/ },              // lire le résultat de la soumission
   { m: ["GET"],  re: /^\/services$/ },                               // liste des services/transporteurs
   { m: ["GET"],  re: /^\/finance\/payment-methods$/ },               // lire le moyen de paiement (requis pour réserver)
+  { m: ["GET"],  re: /^\/shipment\/[A-Za-z0-9_-]{1,80}\/etiquette$/, etiquette: true }, // PDF 4x6 de l'étiquette (lu par la passerelle, voir plus bas)
   { m: ["GET"],  re: /^\/shipment\/[A-Za-z0-9_-]{1,80}(\/[A-Za-z0-9_-]{1,40})?$/ }, // lire un envoi et son étiquette
   { m: ["POST"], re: /^\/shipment$/, achat: true },                  // ACHETER une étiquette (verrouillé, voir plus bas)
   { m: ["POST"], re: new RegExp("^/shipment/[A-Za-z0-9_-]{1,80}/" + CHEMIN_RAM + "$"), ramassage: true }, // RÉSERVER un ramassage (verrouillé)
@@ -106,6 +108,30 @@ function verifierRamassage(corps, cle) {
   return null;
 }
 
+// Étiquette : Freightcom range les PDF sur un stockage AWS public. La passerelle lit l'envoi chez Freightcom,
+// choisit la variante 4x6 (size « a6 », format « pdf », sans marge ; ?marge=1 pour la version avec marge),
+// vérifie que le lien pointe bien vers les étiquettes DE CET ENVOI sur amazonaws.com, puis renvoie le PDF.
+// Elle ne suit jamais un autre lien : pas de redirection, PDF seulement, 5 Mo au plus.
+const MAX_PDF = 5 * 1024 * 1024;
+function lienEtiquetteSur(url, id) {
+  let u; try { u = new URL(url); } catch { return false; }
+  return u.protocol === "https:" && /^[a-z0-9.-]+\.amazonaws\.com$/.test(u.hostname) && u.pathname.includes(`/labels/${id}/`) && /\.pdf$/.test(u.pathname);
+}
+async function etiquette(id, avecMarge, entetes) {
+  const r = await fetch(`${UPSTREAM}/shipment/${id}`, { headers: entetes });
+  if (!r.ok) return { code: r.status, err: r.status === 404 ? "envoi introuvable" : "lecture de l'envoi refusee par Freightcom" };
+  let s; try { const j = await r.json(); s = j.shipment || j; } catch { return { code: 502, err: "reponse Freightcom illisible" }; }
+  const l = (s.labels || []).find((x) => x && x.size === "a6" && x.format === "pdf" && !!x.padded === avecMarge);
+  if (!l) return { code: 404, err: "aucune etiquette 4x6 pour cet envoi (etiquette pas encore prete ?)" };
+  if (!lienEtiquetteSur(l.url, id)) return { code: 502, err: "lien d'etiquette inattendu : refuse" };
+  const p = await fetch(l.url, { redirect: "error" });
+  if (!p.ok) return { code: 502, err: "stockage des etiquettes injoignable (" + p.status + ")" };
+  const b = Buffer.from(await p.arrayBuffer());
+  if (b.length > MAX_PDF) return { code: 502, err: "etiquette trop grosse" };
+  if (b.subarray(0, 5).toString("latin1") !== "%PDF-") return { code: 502, err: "le fichier recu n'est pas un PDF" };
+  return { pdf: b, suivi: s.primary_tracking_number || "" };
+}
+
 function egal(a, b) {
   const ba = Buffer.from(String(a)), bb = Buffer.from(String(b));
   return ba.length === bb.length && crypto.timingSafeEqual(ba, bb);
@@ -155,22 +181,41 @@ const server = http.createServer(async (req, res) => {
     if (refus) return send(403, { error: "ramassage refuse : " + refus });
   }
 
+  const entetes = {
+    authorization: SCHEME ? `${SCHEME} ${TOKEN}` : TOKEN,
+    "content-type": "application/json",
+    accept: "application/json",
+  };
+
+  if (regle.etiquette) {
+    try {
+      const id = path.split("/")[2];
+      const marge = /(^|&)marge=1(&|$)/.test(req.url.split("?")[1] || "");
+      const e = await etiquette(id, marge, entetes);
+      console.log(`${new Date().toISOString()} GET ${path} -> ${e.pdf ? 200 : e.code} ETIQUETTE`);
+      if (!e.pdf) return send(e.code, { error: e.err });
+      res.writeHead(200, { "content-type": "application/pdf", "content-length": e.pdf.length, "x-suivi": e.suivi });
+      return res.end(e.pdf);
+    } catch (err) {
+      return send(502, { error: "echec de la lecture de l'etiquette", detail: String(err) });
+    }
+  }
+
   try {
     const up = await fetch(UPSTREAM + req.url, {
       method: req.method,
-      headers: {
-        authorization: SCHEME ? `${SCHEME} ${TOKEN}` : TOKEN,
-        "content-type": "application/json",
-        accept: "application/json",
-      },
+      headers: entetes,
       body: req.method === "GET" ? undefined : Buffer.concat(chunks),
     });
-    const text = await up.text();
+    let text = await up.text();
+    // Un chemin inexistant chez Freightcom renvoie une erreur AWS qui contient une empreinte de l'en-tête
+    // d'autorisation : on ne la relaie pas.
+    if (up.status === 403 && /Authorization header requires/.test(text)) text = JSON.stringify({ error: "chemin inexistant chez Freightcom" });
     if (req.method === "GET" && /^\/rate\//.test(path) && up.ok) { try { retenirTarifs(JSON.parse(text)); } catch {} }
     if (regle.achat && up.ok) { compteurJour.n++; dejaAchetes.set(cleIdem, { statut: up.status, le: new Date().toISOString() }); }
     if (regle.ramassage && up.ok) { compteurRam.n++; dejaRamasses.set(cleRam, { statut: up.status, le: new Date().toISOString() }); }
     console.log(`${new Date().toISOString()} ${req.method} ${path} -> ${up.status}${regle.achat ? " ACHAT " + cleIdem : ""}${regle.ramassage ? " RAMASSAGE " + cleRam : ""}`);
-    res.writeHead(up.status, { "content-type": up.headers.get("content-type") || "application/json" });
+    res.writeHead(up.status, { "content-type": up.status === 403 && /chemin inexistant/.test(text) ? "application/json" : (up.headers.get("content-type") || "application/json") });
     res.end(text);
   } catch (err) {
     send(502, { error: "echec de la requete amont", detail: String(err) });
