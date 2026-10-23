@@ -1,0 +1,21 @@
+services:
+  - type: web
+    name: freightcom-proxy
+    runtime: node
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /health
+    envVars:
+      - key: UPSTREAM_TOKEN
+        sync: false
+      - key: PROXY_KEY
+        sync: false
+      - key: FREIGHTCOM_ENV
+        value: test
+      - key: ACHATS_ACTIVES
+        value: non
+      - key: MAX_ACHATS_PAR_JOUR
+        value: "10"
+      - key: MAX_PRIX_ETIQUETTE
+        value: "25"
