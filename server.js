@@ -2,6 +2,7 @@
 // Détient la clé Freightcom (variable UPSTREAM_TOKEN sur Render) et expose la demande de tarifs
 // et la lecture des envois. L'achat d'étiquettes existe mais reste verrouillé tant que
 // ACHATS_ACTIVES n'est pas « oui » : une étiquette par commande, plafond quotidien, plafond de 25 $.
+// La réservation de ramassage UPS/GLS reste verrouillée tant que RAMASSAGES_ACTIVES n'est pas « oui ».
 const http = require("http");
 const crypto = require("crypto");
 
@@ -21,11 +22,20 @@ const SCHEME     = (process.env.AUTH_SCHEME || "").trim();
 if (!TOKEN || !PROXY_KEY) { console.error("Il manque UPSTREAM_TOKEN ou PROXY_KEY."); process.exit(1); }
 if (!UPSTREAM) { console.error("FREIGHTCOM_ENV doit être test ou production."); process.exit(1); }
 
+// Ramassages (pickups) : FERMÉS par défaut. S'ouvrent seulement si RAMASSAGES_ACTIVES=oui sur Render.
+// Un seul ramassage par transporteur et par jour (clé RAM-AAAA-MM-JJ-ups|gls), au plus MAX_RAMASSAGES_PAR_JOUR.
+const RAMASSAGES_ACTIVES = (process.env.RAMASSAGES_ACTIVES || "non").toLowerCase() === "oui";
+const MAX_RAM_JOUR       = Math.max(0, Math.min(4, parseInt(process.env.MAX_RAMASSAGES_PAR_JOUR || "2", 10) || 0));
+// Sous-chemin Freightcom de la réservation (« Schedule a dispatch or pickup »). À confirmer au premier essai en test.
+const CHEMIN_RAM         = (process.env.RAMASSAGE_CHEMIN || "schedule").replace(/[^a-z_-]/gi, "");
+const dejaRamasses = new Map();   // clé RAM-… -> réponse
+let compteurRam = { jour: "", n: 0 };
+
 // Achat d'étiquettes : FERMÉ par défaut. S'ouvre seulement si ACHATS_ACTIVES=oui sur Render.
 const ACHATS_ACTIVES   = (process.env.ACHATS_ACTIVES || "non").toLowerCase() === "oui";
 const MAX_ACHATS_JOUR  = Math.max(0, Math.min(50, parseInt(process.env.MAX_ACHATS_PAR_JOUR || "10", 10) || 0));
 
-// Surface autorisée. Tout le reste est refusé (ramassages, factures, manifestes, suppressions).
+// Surface autorisée. Tout le reste est refusé (factures, manifestes, suppressions, LTL).
 const ALLOW = [
   { m: ["POST"], re: /^\/rate$/ },                                   // demander une soumission (202 + request_id)
   { m: ["GET"],  re: /^\/rate\/[A-Za-z0-9_-]{1,80}$/ },              // lire le résultat de la soumission
@@ -33,6 +43,7 @@ const ALLOW = [
   { m: ["GET"],  re: /^\/finance\/payment-methods$/ },               // lire le moyen de paiement (requis pour réserver)
   { m: ["GET"],  re: /^\/shipment\/[A-Za-z0-9_-]{1,80}(\/[A-Za-z0-9_-]{1,40})?$/ }, // lire un envoi et son étiquette
   { m: ["POST"], re: /^\/shipment$/, achat: true },                  // ACHETER une étiquette (verrouillé, voir plus bas)
+  { m: ["POST"], re: new RegExp("^/shipment/[A-Za-z0-9_-]{1,80}/" + CHEMIN_RAM + "$"), ramassage: true }, // RÉSERVER un ramassage (verrouillé)
 ];
 const dejaAchetes = new Map();   // clé d'idempotence -> réponse (perdu au redémarrage : ne pas s'y fier seul)
 let compteurJour = { jour: "", n: 0 };
@@ -44,10 +55,13 @@ const MAX_PRIX = Math.min(25, Number(process.env.MAX_PRIX_ETIQUETTE || "25") || 
 const VALIDITE_TARIF_MS = 3 * 3600e3;
 const tarifsVus = new Map();   // service_id -> { montant, le }
 
+// Freightcom donne les montants en CENTS : total = { currency, value: 1179 } veut dire 11,79 $ (confirmé le 2026-10-23).
 function nombre(v) {
-  if (v && typeof v === "object") v = v.value ?? v.amount ?? v.total;
-  const n = typeof v === "number" ? v : Number(String(v ?? "").replace(",", "."));
-  return Number.isFinite(n) && n > 0 ? n : null;   // lu tel quel, en dollars ; si c'était des cents, tout sera refusé (sûr)
+  let cents = false;
+  if (v && typeof v === "object") { cents = v.value !== undefined; v = v.value ?? v.amount ?? v.total; }
+  let n = typeof v === "number" ? v : Number(String(v ?? "").replace(",", "."));
+  if (cents) n = n / 100;
+  return Number.isFinite(n) && n > 0 ? n : null;
 }
 function retenirTarifs(json) {
   const rates = (json && (json.rates || (json.rate && json.rate.rates))) || [];
@@ -72,6 +86,26 @@ function verifierPrix(corps) {
 }
 const MAX_BODY = 64 * 1024;
 
+// Vérifie le corps d'une réservation de ramassage : courrier seulement (pas de LTL), date = date de la clé,
+// aujourd'hui ou dans les 14 jours, plage horaire cohérente entre 7 h et 19 h. En cas de doute : refus.
+function verifierRamassage(corps, cle) {
+  let b; try { b = JSON.parse(corps); } catch { return "corps de la demande illisible"; }
+  const p = b && b.pickup_details;
+  if (!p || typeof p !== "object") return "pickup_details manquant";
+  if (b.dispatch_details || p.dispatch_details) return "dispatch LTL refuse : courrier seulement";
+  const d = p.date || {}, a = p.ready_at || {}, u = p.ready_until || {};
+  const ymd = `${d.year}-${String(d.month).padStart(2, "0")}-${String(d.day).padStart(2, "0")}`;
+  if (!/^RAM-(\d{4}-\d{2}-\d{2})-(ups|gls)$/.test(cle)) return "cle invalide";
+  if (cle.slice(4, 14) !== ymd) return `date ${ymd} differente de la cle ${cle}`;
+  const auj = new Intl.DateTimeFormat("en-CA", { timeZone: "America/Toronto" }).format(new Date());
+  const j = (Date.parse(ymd) - Date.parse(auj)) / 864e5;
+  if (!(j >= 0 && j <= 14)) return "date passee ou a plus de 14 jours";
+  const m1 = a.hour * 60 + a.minute, m2 = u.hour * 60 + u.minute;
+  if (![m1, m2].every(Number.isFinite)) return "heures illisibles";
+  if (!(m1 >= 420 && m2 <= 1140 && m2 - m1 >= 60)) return "plage horaire hors de 7 h-19 h ou de moins d'une heure";
+  return null;
+}
+
 function egal(a, b) {
   const ba = Buffer.from(String(a)), bb = Buffer.from(String(b));
   return ba.length === bb.length && crypto.timingSafeEqual(ba, bb);
@@ -80,7 +114,7 @@ function egal(a, b) {
 const server = http.createServer(async (req, res) => {
   const send = (code, obj) => { res.writeHead(code, { "content-type": "application/json" }); res.end(JSON.stringify(obj)); };
 
-  if (req.url === "/" || req.url === "/health") return send(200, { ok: true, env: ENV, achats_actives: ACHATS_ACTIVES, max_achats_jour: MAX_ACHATS_JOUR, max_prix_etiquette: MAX_PRIX });
+  if (req.url === "/" || req.url === "/health") return send(200, { ok: true, env: ENV, achats_actives: ACHATS_ACTIVES, max_achats_jour: MAX_ACHATS_JOUR, max_prix_etiquette: MAX_PRIX, ramassages_actives: RAMASSAGES_ACTIVES, max_ramassages_jour: MAX_RAM_JOUR, chemin_ramassage: CHEMIN_RAM });
   if (!egal(req.headers["x-proxy-key"] || "", PROXY_KEY)) return send(401, { error: "cle de passerelle invalide" });
 
   const path = req.url.split("?")[0];
@@ -98,12 +132,27 @@ const server = http.createServer(async (req, res) => {
     if (compteurJour.n >= MAX_ACHATS_JOUR) return send(429, { error: `plafond de ${MAX_ACHATS_JOUR} achats par jour atteint` });
   }
 
+  let cleRam = null;
+  if (regle.ramassage) {
+    if (!RAMASSAGES_ACTIVES) return send(403, { error: "ramassages desactives (RAMASSAGES_ACTIVES n'est pas 'oui')" });
+    cleRam = String(req.headers["x-cle-ramassage"] || "");
+    if (!/^RAM-\d{4}-\d{2}-\d{2}-(ups|gls)$/.test(cleRam)) return send(400, { error: "en-tete x-cle-ramassage manquant ou invalide (RAM-AAAA-MM-JJ-ups|gls)" });
+    if (dejaRamasses.has(cleRam)) return send(409, { error: "ramassage deja reserve pour ce transporteur ce jour-la", precedent: dejaRamasses.get(cleRam) });
+    const jour = new Date().toISOString().slice(0, 10);
+    if (compteurRam.jour !== jour) compteurRam = { jour, n: 0 };
+    if (compteurRam.n >= MAX_RAM_JOUR) return send(429, { error: `plafond de ${MAX_RAM_JOUR} ramassages par jour atteint` });
+  }
+
   const chunks = []; let taille = 0;
   for await (const c of req) { taille += c.length; if (taille > MAX_BODY) return send(413, { error: "requete trop grosse" }); chunks.push(c); }
 
   if (regle.achat) {
     const refus = verifierPrix(Buffer.concat(chunks).toString("utf8"));
     if (refus) return send(403, { error: "achat refuse : " + refus });
+  }
+  if (regle.ramassage) {
+    const refus = verifierRamassage(Buffer.concat(chunks).toString("utf8"), cleRam);
+    if (refus) return send(403, { error: "ramassage refuse : " + refus });
   }
 
   try {
@@ -119,7 +168,8 @@ const server = http.createServer(async (req, res) => {
     const text = await up.text();
     if (req.method === "GET" && /^\/rate\//.test(path) && up.ok) { try { retenirTarifs(JSON.parse(text)); } catch {} }
     if (regle.achat && up.ok) { compteurJour.n++; dejaAchetes.set(cleIdem, { statut: up.status, le: new Date().toISOString() }); }
-    console.log(`${new Date().toISOString()} ${req.method} ${path} -> ${up.status}${regle.achat ? " ACHAT " + cleIdem : ""}`);
+    if (regle.ramassage && up.ok) { compteurRam.n++; dejaRamasses.set(cleRam, { statut: up.status, le: new Date().toISOString() }); }
+    console.log(`${new Date().toISOString()} ${req.method} ${path} -> ${up.status}${regle.achat ? " ACHAT " + cleIdem : ""}${regle.ramassage ? " RAMASSAGE " + cleRam : ""}`);
     res.writeHead(up.status, { "content-type": up.headers.get("content-type") || "application/json" });
     res.end(text);
   } catch (err) {
