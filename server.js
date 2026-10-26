@@ -36,8 +36,44 @@ let compteurRam = { jour: "", n: 0 };
 const ACHATS_ACTIVES   = (process.env.ACHATS_ACTIVES || "non").toLowerCase() === "oui";
 const MAX_ACHATS_JOUR  = Math.max(0, Math.min(50, parseInt(process.env.MAX_ACHATS_PAR_JOUR || "10", 10) || 0));
 
+// Vérification d'adresse (2026-10-25, demande d'Alexandre) : la tâche d'achat ne peut pas joindre geocoder.ca elle-même.
+// POST /adresse {adresse, ville, province} -> la passerelle interroge geocoder.ca et ne renvoie que le résultat normalisé.
+// Rien n'est conservé ni journalisé (ni l'adresse ni la réponse). GEOCODER_AUTH (facultatif) = jeton payant geocoder.ca.
+const GEOCODER_AUTH    = (process.env.GEOCODER_AUTH || "").trim();
+const MAX_ADRESSES_JOUR = Math.max(0, Math.min(200, parseInt(process.env.MAX_ADRESSES_PAR_JOUR || "60", 10) || 0));
+let compteurAdr = { jour: "", n: 0 };
+const TEXTE_ADR = /^[\p{L}\p{N} .,'’#\/()&-]{1,120}$/u;
+function txt(v) { return typeof v === "string" ? v.trim() : typeof v === "number" ? String(v) : ""; }
+async function verifierAdresse(corps) {
+  let b; try { b = JSON.parse(corps); } catch { return { code: 400, obj: { error: "corps illisible" } }; }
+  const a = txt(b && b.adresse), v = txt(b && b.ville), p = txt(b && b.province).toUpperCase();
+  if (!TEXTE_ADR.test(a) || !TEXTE_ADR.test(v) || !/^[A-Z]{2}$/.test(p)) return { code: 400, obj: { error: "adresse, ville (texte simple, 120 caracteres au plus) et province (2 lettres) requis" } };
+  const jour = new Date().toISOString().slice(0, 10);
+  if (compteurAdr.jour !== jour) compteurAdr = { jour, n: 0 };
+  if (compteurAdr.n >= MAX_ADRESSES_JOUR) return { code: 429, obj: { error: `plafond de ${MAX_ADRESSES_JOUR} verifications d'adresse par jour atteint` } };
+  compteurAdr.n++;
+  const url = "https://geocoder.ca/?locate=" + encodeURIComponent(`${a}, ${v}, ${p}`) + "&json=1&standard=1" + (GEOCODER_AUTH ? "&auth=" + encodeURIComponent(GEOCODER_AUTH) : "");
+  let r, d;
+  try { r = await fetch(url, { redirect: "error", signal: AbortSignal.timeout(20000), headers: { accept: "application/json" } }); }
+  catch (e) { return { code: 502, obj: { error: "geocoder.ca injoignable" } }; }
+  const t = await r.text();
+  try { d = JSON.parse(t); } catch { return { code: 502, obj: { error: `reponse illisible de geocoder.ca (HTTP ${r.status})` } }; }
+  const st = (d && typeof d.standard === "object" && d.standard) || {};
+  const err = d && d.error && typeof d.error === "object" ? { code: txt(d.error.code), description: txt(d.error.description) } : null;
+  const cs = txt(st.confidence) || txt(d && d.confidence), conf = cs ? Number(cs) : NaN;
+  return { code: 200, obj: {
+    reconnue: !err && !!txt(d && d.latt),
+    numero: txt(st.stnumber) || null, rue: txt(st.staddress) || null, ville: txt(st.city) || null, province: txt(st.prov) || null,
+    code_postal: (txt(d && d.postal) || txt(st.postal) || "").toUpperCase().replace(/^([A-Z]\d[A-Z])\s*(\d[A-Z]\d)$/, "$1 $2") || null,
+    confiance: Number.isFinite(conf) ? conf : null,
+    non_utilise: txt(d && d.more) || txt(st.more) || null,
+    erreur: err, source: "geocoder.ca", jeton: !!GEOCODER_AUTH, restantes_aujourdhui: MAX_ADRESSES_JOUR - compteurAdr.n,
+  } };
+}
+
 // Surface autorisée. Tout le reste est refusé (factures, manifestes, suppressions, LTL).
 const ALLOW = [
+  { m: ["POST"], re: /^\/adresse$/, adresse: true },                 // VÉRIFIER une adresse (geocoder.ca, voir plus haut)
   { m: ["POST"], re: /^\/rate$/ },                                   // demander une soumission (202 + request_id)
   { m: ["GET"],  re: /^\/rate\/[A-Za-z0-9_-]{1,80}$/ },              // lire le résultat de la soumission
   { m: ["GET"],  re: /^\/services$/ },                               // liste des services/transporteurs
@@ -147,7 +183,7 @@ function egal(a, b) {
 const server = http.createServer(async (req, res) => {
   const send = (code, obj) => { res.writeHead(code, { "content-type": "application/json" }); res.end(JSON.stringify(obj)); };
 
-  if (req.url === "/" || req.url === "/health") return send(200, { ok: true, env: ENV, achats_actives: ACHATS_ACTIVES, max_achats_jour: MAX_ACHATS_JOUR, max_prix_etiquette: MAX_PRIX, pct_commande_au_dessus: PCT_COMMANDE, max_prix_absolu: MAX_PRIX_ABSOLU, ramassages_actives: RAMASSAGES_ACTIVES, max_ramassages_jour: MAX_RAM_JOUR, chemin_ramassage: CHEMIN_RAM });
+  if (req.url === "/" || req.url === "/health") return send(200, { ok: true, env: ENV, achats_actives: ACHATS_ACTIVES, max_achats_jour: MAX_ACHATS_JOUR, max_prix_etiquette: MAX_PRIX, pct_commande_au_dessus: PCT_COMMANDE, max_prix_absolu: MAX_PRIX_ABSOLU, ramassages_actives: RAMASSAGES_ACTIVES, max_ramassages_jour: MAX_RAM_JOUR, max_adresses_jour: MAX_ADRESSES_JOUR, jeton_geocoder: !!GEOCODER_AUTH, chemin_ramassage: CHEMIN_RAM });
   if (!egal(req.headers["x-proxy-key"] || "", PROXY_KEY)) return send(401, { error: "cle de passerelle invalide" });
 
   const path = req.url.split("?")[0];
@@ -188,6 +224,12 @@ const server = http.createServer(async (req, res) => {
   if (regle.ramassage) {
     const refus = verifierRamassage(Buffer.concat(chunks).toString("utf8"), cleRam);
     if (refus) return send(403, { error: "ramassage refuse : " + refus });
+  }
+
+  if (regle.adresse) {
+    const out = await verifierAdresse(Buffer.concat(chunks).toString("utf8"));
+    console.log(`${new Date().toISOString()} POST /adresse -> ${out.code} ADRESSE`);
+    return send(out.code, out.obj);
   }
 
   const entetes = {
