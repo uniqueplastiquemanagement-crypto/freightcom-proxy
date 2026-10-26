@@ -36,7 +36,7 @@ const { M, erreurMoteur, SHOP, appShopify, shopify, REQ_COMMANDES, cpNorm, maint
 let PDFDocument = null;
 try { ({ PDFDocument } = require("pdf-lib")); } catch { /* signalé par l'outil etat */ }
 
-const VERSION = "1.4.0";
+const VERSION = "1.4.1";
 const PORT = process.env.PORT || 10000;
 const PROXY_KEY = process.env.PROXY_KEY || "";
 const ENV = (process.env.FREIGHTCOM_ENV || "test").toLowerCase();
@@ -257,6 +257,7 @@ function vueLot(l) {
 const rien = (raison, plus = {}) => Object.assign({ statut: "saute", raison, transporteur: null, service: null, montant_ttc: null, suivi: null, tracking_url: null, shipment_id: null, pages: 0 }, plus);
 const erreur = (raison, plus = {}) => Object.assign(rien(raison, plus), { statut: "erreur" });
 
+async function pagesPdf(buf) { if (!PDFDocument) return 1; try { return (await PDFDocument.load(buf, { updateMetadata: false })).getPageCount() || 1; } catch (e) { return 1; } }
 async function traiterLot(l, regle) {
   try {
     l.etape = "lecture des commandes dans Shopify";
@@ -403,7 +404,9 @@ async function traiterLot(l, regle) {
         achete_a: maintenant(), essai: ENV === "test", pages: 0 });
       if (!deja && Number.isFinite(res.montant_ttc)) l.cout += res.montant_ttc;
       const r5 = env ? await passerelle("GET", `/shipment/${sid}/etiquette`, { brut: true }) : null;
-      if (r5 && r5.status === 200 && r5.buf.subarray(0, 5).toString("latin1") === "%PDF-") { l.pdfs.push(r5.buf); res.pages = 1; }
+      // pages = nombre de pages de CETTE étiquette (une par colis : un B2B en 2 cartons en a 2). Le Poste s'en sert pour retrouver
+      // l'étiquette d'une commande dans le PDF du lot (réimpression d'une seule étiquette, onglet « Historique des étiquettes »).
+      if (r5 && r5.status === 200 && r5.buf.subarray(0, 5).toString("latin1") === "%PDF-") { l.pdfs.push(r5.buf); res.pages = await pagesPdf(r5.buf); }
       else res.raison = (res.raison ? res.raison + " ; " : "") + "étiquette achetée mais PDF non récupéré";
       l.resultats[no] = res;
     }
