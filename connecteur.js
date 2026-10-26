@@ -36,7 +36,7 @@ const { M, erreurMoteur, SHOP, appShopify, shopify, REQ_COMMANDES, cpNorm, maint
 let PDFDocument = null;
 try { ({ PDFDocument } = require("pdf-lib")); } catch { /* signalé par l'outil etat */ }
 
-const VERSION = "1.2.0";
+const VERSION = "1.3.0";
 const PORT = process.env.PORT || 10000;
 const PROXY_KEY = process.env.PROXY_KEY || "";
 const ENV = (process.env.FREIGHTCOM_ENV || "test").toLowerCase();
@@ -456,6 +456,15 @@ const OUTILS = [
   { name: "pdf_lot", description: "Une partie (base64) du PDF 4×6 fusionné d'un lot terminé. Parties numérotées à partir de 0 ; le nombre de parties est dans etat_lot.",
     annotations: { title: "PDF des étiquettes", readOnlyHint: true, openWorldHint: false },
     inputSchema: { type: "object", additionalProperties: false, required: ["lot_id", "partie"], properties: { lot_id: { type: "string", pattern: "^L\\d{8}-\\d{6}-[a-z0-9]{4}$" }, partie: { type: "integer", minimum: 0, maximum: 200 } } } },
+  { name: "imprimer_document", description: "Dépose un document dans la file de l'imprimante de l'usine ; le PC de l'usine le prend et l'imprime sans clic. Type « bons_b2b » : HTML simple (sans script, image ni lien externe), imprimé en couleur sur la Brother. Type « etiquettes » : PDF 4×6 d'un ancien lot (base64), réimprimé sur l'imprimante d'étiquettes. Envoyé en parties (≤ 300 Ko chacune) ; le document est prêt quand toutes les parties sont reçues. N'achète rien et ne lit rien dans Shopify.",
+    annotations: { title: "Imprimer à l'usine", readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    inputSchema: { type: "object", additionalProperties: false, required: ["doc_id", "type", "partie", "parties"], properties: {
+      doc_id: { type: "string", pattern: "^D\\d{8}-\\d{6}-[a-z0-9]{4}$", description: "identifiant du document écrit par le Poste" },
+      type: { type: "string", enum: ["bons_b2b", "etiquettes"], description: "bons_b2b : HTML pour la Brother ; etiquettes : PDF 4×6 pour l'imprimante d'étiquettes" },
+      lot: { type: "string", pattern: "^L\\d{8}-\\d{6}-[a-z0-9]{4}$", description: "etiquettes : le lot d'origine (pour le journal)" },
+      partie: { type: "integer", minimum: 0, maximum: 19 }, parties: { type: "integer", minimum: 1, maximum: 20 },
+      html: { type: "string", minLength: 1, maxLength: 307200, description: "bons_b2b : cette partie du document HTML" },
+      base64: { type: "string", minLength: 1, maxLength: 307200, description: "etiquettes : cette partie du PDF en base64" } } } },
   { name: "etat", description: "Réglages de la passerelle et du connecteur : environnement Freightcom, achats ouverts, garde-fou technique, app Shopify branchée, magasinage Shopify (dernière lecture, signaux), lot en cours.",
     annotations: { title: "État de la passerelle", readOnlyHint: true, openWorldHint: false },
     inputSchema: { type: "object", additionalProperties: false, properties: {} } },
@@ -468,9 +477,10 @@ async function appelerOutil(nom, args) {
     const h = await passerelle("GET", "/health");
     return Object.assign({}, h.json || {}, { connecteur: VERSION, app_shopify: appShopify(), boutique: SHOP || null, shopify: await diagnosticShopify(), pdf_lib: !!PDFDocument, telephone_usine: !!TEL_USINE, garde_technique_ttc: GARDE_TECHNIQUE, magasinage: magasinage.etat(),
       table_shopify: TABLE_SH ? { version: TABLE_SH.version, mesure_le: TABLE_SH.mesure_le, valide_jusqu_au: TABLE_SH.valide_jusqu_au, origine_cp: TABLE_SH.origine_cp, zones: Object.keys(TABLE_SH.zones).length, rta: Object.keys(TABLE_SH.rta).length, groupes: Object.keys(TABLE_SH.groupes || {}).length } : { erreur: ERREUR_TABLE || "absente" },
-      lot_en_cours: [...lots.values()].some((l) => l.statut === "en_cours"), impression_usine: imprimanteUsine() });
+      lot_en_cours: [...lots.values()].some((l) => l.statut === "en_cours"), impression_usine: imprimanteUsine(), documents_a_imprimer: docsAImprimer().length });
   }
   if (nom === "tarifs_shopify") return { commandes: magasinage.etatCommandes(args.commandes) };
+  if (nom === "imprimer_document") return recevoirDocument(args);
   const id = String(args.lot_id || "");
   if (!RE_LOT.test(id)) throw new Error("lot_id invalide");
   if (nom === "etat_lot") { const l = lots.get(id); if (!l) throw new Error("lot inconnu de la passerelle (redémarrée ?) : relancer le lot depuis le Poste"); return vueLot(l); }
@@ -562,6 +572,9 @@ function etatPublic() {
 //   GET  /impression/<jeton>/file              -> lots finis depuis moins de 2 h, pas encore imprimés [{lot_id, pages, octets, sha256, fin_a}]
 //   GET  /impression/<jeton>/<lot>.pdf         -> le PDF 4×6 du lot
 //   POST /impression/<jeton>/<lot>/imprime     -> le PC confirme l'impression (le lot n'est plus proposé)
+//   GET  /impression/<jeton>/<doc>.html        -> un document HTML déposé par l'outil imprimer_document (bons B2B, Brother couleur)
+//   POST /impression/<jeton>/<doc>/imprime     -> le PC confirme l'impression du document
+// La file « file » donne aussi les documents : [{doc_id, type, octets, sha256, cree_a}].
 // Jeton = HMAC(PROXY_KEY, « impression-usine-v1 »), 48 caractères ; mauvais jeton ou chemin = 404. N'ouvre rien d'autre
 // (ni achat, ni lecture d'envoi, ni connecteur). Les lots sont en mémoire : une passerelle redémarrée n'a plus rien à imprimer.
 const IMPRESSION_FENETRE_MS = 2 * 3600e3, IMPRESSION_EN_LIGNE_MS = 90e3;
@@ -572,18 +585,86 @@ function jetonImpression() {
   if (!PROXY_KEY) return null;
   return crypto.createHmac("sha256", PROXY_KEY).update("impression-usine-v1").digest("hex").slice(0, 48);
 }
+// Documents (en mémoire, 2 h au plus, 40 au plus) :
+//  - bons_b2b : HTML simple seulement (script et ressources externes refusés ici) ; le PC l'ouvre dans Edge, en fait
+//    un PDF et l'imprime en couleur sur la Brother ;
+//  - etiquettes : le PDF 4×6 d'un ancien lot (réimpression demandée dans le Poste) ; seulement des pages 4×6, pour
+//    l'imprimante d'étiquettes. Rien n'est racheté.
+const RE_DOC = /^D\d{8}-\d{6}-[a-z0-9]{4}$/, DOC_TYPES = ["bons_b2b", "etiquettes"], DOC_MAX_OCTETS = 4 * 1024 * 1024, DOC_PARTIE_MAX = 300 * 1024, DOCS_MAX = 40;
+const DOC_INTERDIT = /<script|<iframe|<object|<embed|<link|<img|<svg|<form|<base|<meta(?!\s+charset=)|javascript:|url\s*\(|@import|\son[a-z]+\s*=/i;
+const docs = new Map();
+function nettoyerDocs() { const t = Date.now(); for (const [id, d] of docs) if (t - d.cree > IMPRESSION_FENETRE_MS) docs.delete(id); }
+function docsAImprimer() { nettoyerDocs(); return [...docs.values()].filter((d) => d.html && !d.imprime_usine); }
+function vueDoc(d) { return { doc_id: d.doc_id, type: d.type, lot: d.lot || null, pret: !!d.html, recu: d.parties.filter((x) => x != null).length, parties: d.n, octets: d.html ? d.html.length : null, imprimante_usine: imprimanteUsine(), imprime_usine: d.imprime_usine }; }
+async function recevoirDocument(args) {
+  nettoyerDocs();
+  const id = String(args.doc_id || ""), type = String(args.type || ""), i = Number(args.partie), n = Number(args.parties);
+  const html = type === "etiquettes" ? args.base64 : args.html;
+  if (!RE_DOC.test(id)) throw new Error("doc_id invalide");
+  if (!DOC_TYPES.includes(type)) throw new Error("type de document inconnu");
+  if (!Number.isInteger(n) || n < 1 || n > 20 || !Number.isInteger(i) || i < 0 || i >= n) throw new Error("parties invalides");
+  if (typeof html !== "string" || !html.length || html.length > DOC_PARTIE_MAX) throw new Error(type === "etiquettes" ? "base64 : partie vide ou trop grosse" : "html : partie vide ou trop grosse");
+  if (type === "etiquettes" && !/^[A-Za-z0-9+/=]+$/.test(html)) throw new Error("base64 illisible");
+  const lot = args.lot == null ? null : String(args.lot);
+  if (lot && !RE_LOT.test(lot)) throw new Error("lot invalide");
+  let d = docs.get(id);
+  if (d && d.html) return vueDoc(d);   // déjà complet : rien à refaire
+  if (!d) {
+    if (docs.size >= DOCS_MAX) throw new Error("trop de documents en attente : le PC de l'usine est-il allumé ?");
+    d = { doc_id: id, type, lot, n, parties: new Array(n).fill(null), cree: Date.now(), cree_a: maintenant(), html: null, sha: null, imprime_usine: null };
+    docs.set(id, d);
+  }
+  if (d.type !== type || d.n !== n) throw new Error("document incohérent (type ou nombre de parties)");
+  d.parties[i] = html;
+  if (d.parties.every((x) => x != null)) {
+    const tout = d.parties.join("");
+    let corps;
+    if (type === "etiquettes") {
+      corps = Buffer.from(tout, "base64");
+      if (corps.length > DOC_MAX_OCTETS) { docs.delete(id); throw new Error("PDF trop gros"); }
+      if (corps.subarray(0, 5).toString("latin1") !== "%PDF-") { docs.delete(id); throw new Error("ce n'est pas un PDF"); }
+      if (!PDFDocument) { docs.delete(id); throw new Error("pdf-lib absent : PDF pas vérifiable"); }
+      let pdf; try { pdf = await PDFDocument.load(corps, { updateMetadata: false }); } catch (e) { docs.delete(id); throw new Error("PDF illisible"); }
+      const pages = pdf.getPages();
+      if (!pages.length || pages.length > 200 || pages.some((p) => { const { width, height } = p.getSize(); return Math.abs(width - 288) > 3 || Math.abs(height - 432) > 3; })) { docs.delete(id); throw new Error("PDF refusé : seulement des pages 4×6 (288×432 points)"); }
+      d.pages = pages.length;
+    } else {
+      corps = Buffer.from(tout, "utf8");
+      if (corps.length > DOC_MAX_OCTETS / 2) { docs.delete(id); throw new Error("document trop gros"); }
+      if (!/^<!doctype html>/i.test(tout) || DOC_INTERDIT.test(tout)) { docs.delete(id); throw new Error("document refusé : HTML simple seulement (ni script, ni image, ni lien externe)"); }
+    }
+    d.html = corps; d.sha = crypto.createHash("sha256").update(corps).digest("hex"); d.pret_a = maintenant(); d.parties = d.parties.map(() => "");
+    journal(`document ${id} (${type}${lot ? ", lot " + lot : ""}) prêt pour l'imprimante de l'usine : ${corps.length} octets`);
+  }
+  return vueDoc(d);
+}
 function imprimanteUsine() { return { en_ligne: !!impressionVu && Date.now() - impressionVu < IMPRESSION_EN_LIGNE_MS, vu_a: impressionVu ? new Date(impressionVu).toISOString() : null }; }
 async function traiterImpression(req, res, chemin) {
   const fin = (code, obj) => { res.writeHead(code, { "content-type": "application/json", "cache-control": "no-store" }); res.end(JSON.stringify(obj)); };
   const jeton = jetonImpression();
-  const m = /^\/impression\/([A-Za-z0-9]{32,128})\/(?:(file)|(L\d{8}-\d{6}-[a-z0-9]{4})\.pdf|(L\d{8}-\d{6}-[a-z0-9]{4})\/imprime)$/.exec(chemin);
+  const m = /^\/impression\/([A-Za-z0-9]{32,128})\/(?:(file)|(L\d{8}-\d{6}-[a-z0-9]{4})\.pdf|(L\d{8}-\d{6}-[a-z0-9]{4})\/imprime|(D\d{8}-\d{6}-[a-z0-9]{4})\.(html|pdf)|(D\d{8}-\d{6}-[a-z0-9]{4})\/imprime)$/.exec(chemin);
   if (!jeton || !m || !egal(m[1], jeton)) return fin(404, { error: "introuvable" });
   impressionVu = Date.now();
   if (m[2]) {
     if (req.method !== "GET") return fin(405, { error: "GET seulement" });
     const prets = [...lots.values()].filter((l) => l.statut !== "en_cours" && l.pdf && !l.imprime_usine && Date.now() - (Date.parse(l.fin_a) || 0) < IMPRESSION_FENETRE_MS)
       .map((l) => ({ lot_id: l.lot_id, pages: l.pages, octets: l.pdf.length, sha256: l.sha, fin_a: l.fin_a }));
-    return fin(200, { lots: prets });
+    const documents = docsAImprimer().map((d) => ({ doc_id: d.doc_id, type: d.type, lot: d.lot || null, pages: d.pages || null, octets: d.html.length, sha256: d.sha, cree_a: d.cree_a }));
+    return fin(200, { lots: prets, documents });
+  }
+  if (m[5] || m[7]) {
+    const d = docs.get(m[5] || m[7]);
+    if (!d || !d.html) return fin(404, { error: "document inconnu ou pas prêt" });
+    if (m[5]) {
+      if (req.method !== "GET") return fin(405, { error: "GET seulement" });
+      if ((m[6] === "pdf") !== (d.type === "etiquettes")) return fin(404, { error: "document inconnu ou pas prêt" });
+      res.writeHead(200, Object.assign({ "content-length": String(d.html.length), "cache-control": "no-store", "x-content-type-options": "nosniff" }, d.type === "etiquettes"
+        ? { "content-type": "application/pdf" } : { "content-type": "text/html; charset=utf-8", "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'" }));
+      return res.end(d.html);
+    }
+    if (req.method !== "POST") return fin(405, { error: "POST seulement" });
+    if (!d.imprime_usine) { d.imprime_usine = maintenant(); journal(`document ${d.doc_id} imprimé à l'usine`); }
+    return fin(200, { ok: true, doc_id: d.doc_id, imprime_a: d.imprime_usine });
   }
   const id = m[3] || m[4], l = lots.get(id);
   if (!l || !l.pdf) return fin(404, { error: "lot inconnu ou PDF pas prêt" });
@@ -598,4 +679,4 @@ async function traiterImpression(req, res, chemin) {
 }
 
 
-module.exports = { traiter, traiterImpression, etatPublic, jetonConnecteur, jetonImpression, _test: { dateExpedition, signauxAdresse, civiqueEtRue, numeroCivique, rueEgale, villeNorm, propre, messageAchat, validerAjustements, ajuster, appelerOutil, lots } };
+module.exports = { traiter, traiterImpression, etatPublic, jetonConnecteur, jetonImpression, _test: { docs, recevoirDocument, dateExpedition, signauxAdresse, civiqueEtRue, numeroCivique, rueEgale, villeNorm, propre, messageAchat, validerAjustements, ajuster, appelerOutil, lots } };
