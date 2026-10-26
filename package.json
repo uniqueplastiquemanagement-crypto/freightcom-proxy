@@ -2,8 +2,15 @@
   "name": "freightcom-proxy",
   "version": "1.0.0",
   "private": true,
-  "description": "Passerelle Freightcom (tarifs, achat verrouillé) pour Unique Plastique",
+  "description": "Passerelle Freightcom (tarifs, achat verrouillé, connecteur du Poste) pour Unique Plastique",
   "main": "server.js",
-  "scripts": { "start": "node server.js" },
-  "engines": { "node": ">=20" }
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "pdf-lib": "1.17.1"
+  }
 }
