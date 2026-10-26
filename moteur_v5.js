@@ -87,7 +87,7 @@ function rentre(b, n) {
   // Les trous (petites glissées dans les espaces) n'existent que dans une boîte presque pleine (≥ 75 %).
   // Pour qu'enlever une pince ne fasse jamais « déborder » une boîte, on prend le meilleur des deux :
   // la place libre réelle, ou ce qu'on aurait à 75 % de remplissage (place libre + trous).
-  const SEUIL = 0.75;
+  const SEUIL = b.seuil_trous != null ? b.seuil_trous : 0.75;   // seuil_trous (par boîte) : 6x4x2 = 1, les trous n'existent que boîte pleine (3 M + 3 P ne rentrent pas, 26 oct.)
   const pPlace = b.max.P || b.p_melange || 0;   // p_melange : petites qui tiennent dans l'espace libre d'une boîte non utilisée pour des petites seules
   const placeA = x => (pPlace ? Math.floor((1 - x) * pPlace + 1e-9) : 0);
   const trou = trouPlein;
@@ -172,6 +172,7 @@ function validerRegle(r) {
     if (!(Number.isInteger(b.depassement_M || 0) && (b.depassement_M || 0) >= 0)) err.push(`boîte ${b.nom} : depassement_M invalide`);
     if (!(typeof b.poids_vide_g === "number" && b.poids_vide_g >= 0)) err.push(`boîte ${b.nom} : poids_vide_g manquant`);
     if (b.p_melange != null && !(Number.isInteger(b.p_melange) && b.p_melange > 0)) err.push(`boîte ${b.nom} : p_melange doit être un entier positif`);
+    if (b.seuil_trous != null && !(typeof b.seuil_trous === "number" && b.seuil_trous >= 0.5 && b.seuil_trous <= 1)) err.push(`boîte ${b.nom} : seuil_trous doit être entre 0,5 et 1`);
     for (const e of b.exemples || []) if (!rentre(b, e)) err.push(`boîte ${b.nom} : l'exemple ${JSON.stringify(e)} ne rentre pas selon les paramètres (règle incohérente)`);
   }
   for (const k of ["P", "M", "G"]) if (!(r.poids_g && pos(r.poids_g[k]))) err.push(`poids ${k} manquant ou nul`);

@@ -511,7 +511,7 @@ async function repondre(msg) {
   if (method === "initialize") {
     const v = params && VERSIONS.includes(params.protocolVersion) ? params.protocolVersion : VERSIONS[1];
     return ok(id, { protocolVersion: v, capabilities: { tools: { listChanged: false } }, serverInfo: { name: "freightcom-unique-plastique", title: "Freightcom UP", version: VERSION },
-      instructions: "Outils du Poste d'expédition d'Unique Plastique (Freightcom, environnement test). N'appeler lancer_lot que sur demande explicite d'Alexandre ou depuis le bouton du Poste." });
+      instructions: `Outils du Poste d'expédition d'Unique Plastique (Freightcom, environnement ${ENV}${ENV === "production" ? " : VRAIES étiquettes payées" : ""}). N'appeler lancer_lot que sur demande explicite d'Alexandre ou depuis le bouton du Poste.` });
   }
   if (method === "ping") return ok(id, {});
   if (method === "tools/list") return ok(id, { tools: OUTILS });
