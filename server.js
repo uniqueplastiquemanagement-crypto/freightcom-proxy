@@ -310,6 +310,8 @@ async function traiterRequete(req, res) {
   const path = req.url.split("?")[0];
   // Connecteur du Poste : protégé par son adresse secrète (mauvais jeton = 404), pas par x-proxy-key.
   if (path.startsWith("/mcp/")) return connecteur.traiter(req, res, path).catch(() => { try { if (!res.headersSent) send(500, { error: "erreur du connecteur" }); else res.end(); } catch {} });
+  // Impression à l'usine : le programme du PC vient chercher les PDF des lots finis (adresse secrète, mauvais jeton = 404).
+  if (path.startsWith("/impression/")) return connecteur.traiterImpression(req, res, path).catch(() => { try { if (!res.headersSent) send(500, { error: "erreur d'impression" }); else res.end(); } catch {} });
   if (path.startsWith("/.well-known/")) return send(404, { error: "introuvable" }); // pas d'OAuth : le client du connecteur ne doit pas voir un 401
   // Deux clés : /magasinage/* n'accepte QUE la clé de lecture ; tout le reste n'accepte QUE la clé de passerelle.
   const estMagasinage = path.startsWith("/magasinage/");

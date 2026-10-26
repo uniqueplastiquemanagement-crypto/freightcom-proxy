@@ -251,6 +251,7 @@ function vueLot(l) {
     resultats: l.resultats, adresses: l.adresses, cout_total_ttc: arrondi(l.cout),
     pdf: l.pdf ? { pages: l.pages, parties: l.parties.length, octets: l.pdf.length, sha256: l.sha } : null,
     note: l.note || null, erreur: l.erreur || null, env: ENV, version_regle: l.version_regle || null, connecteur: VERSION,
+    imprimante_usine: imprimanteUsine(), imprime_usine: l.imprime_usine || null,
   };
 }
 const rien = (raison, plus = {}) => Object.assign({ statut: "saute", raison, transporteur: null, service: null, montant_ttc: null, suivi: null, tracking_url: null, shipment_id: null, pages: 0 }, plus);
@@ -467,7 +468,7 @@ async function appelerOutil(nom, args) {
     const h = await passerelle("GET", "/health");
     return Object.assign({}, h.json || {}, { connecteur: VERSION, app_shopify: appShopify(), boutique: SHOP || null, shopify: await diagnosticShopify(), pdf_lib: !!PDFDocument, telephone_usine: !!TEL_USINE, garde_technique_ttc: GARDE_TECHNIQUE, magasinage: magasinage.etat(),
       table_shopify: TABLE_SH ? { version: TABLE_SH.version, mesure_le: TABLE_SH.mesure_le, valide_jusqu_au: TABLE_SH.valide_jusqu_au, origine_cp: TABLE_SH.origine_cp, zones: Object.keys(TABLE_SH.zones).length, rta: Object.keys(TABLE_SH.rta).length, groupes: Object.keys(TABLE_SH.groupes || {}).length } : { erreur: ERREUR_TABLE || "absente" },
-      lot_en_cours: [...lots.values()].some((l) => l.statut === "en_cours") });
+      lot_en_cours: [...lots.values()].some((l) => l.statut === "en_cours"), impression_usine: imprimanteUsine() });
   }
   if (nom === "tarifs_shopify") return { commandes: magasinage.etatCommandes(args.commandes) };
   const id = String(args.lot_id || "");
@@ -553,7 +554,48 @@ async function traiter(req, res, chemin) {
 function etatPublic() {
   // table Shopify en place (rien de secret) : la vérification aux deux semaines s'en sert pour confirmer quelle table tourne
   const table_shopify = TABLE_SH ? { version: TABLE_SH.version, valide_jusqu_au: TABLE_SH.valide_jusqu_au, origine_cp: TABLE_SH.origine_cp } : { erreur: ERREUR_TABLE ? "illisible" : "absente" };
-  return { actif: !!jetonConnecteur() && !erreurMoteur, app_shopify: appShopify(), version: VERSION, table_shopify, paiement: MOYEN_PAIEMENT_OK ? MOYEN_PAIEMENT : "invalide" };
+  return { actif: !!jetonConnecteur() && !erreurMoteur, app_shopify: appShopify(), version: VERSION, table_shopify, paiement: MOYEN_PAIEMENT_OK ? MOYEN_PAIEMENT : "invalide", impression_usine: imprimanteUsine() };
+}
+// ---------- Impression à l'usine (26 oct. 2026, demande d'Alexandre : « zéro clic ») ----------
+// Le programme d'impression du PC de l'usine vient chercher lui-même le PDF des lots finis, peu importe l'appareil
+// qui a cliqué « Acheter et imprimer » :
+//   GET  /impression/<jeton>/file              -> lots finis depuis moins de 2 h, pas encore imprimés [{lot_id, pages, octets, sha256, fin_a}]
+//   GET  /impression/<jeton>/<lot>.pdf         -> le PDF 4×6 du lot
+//   POST /impression/<jeton>/<lot>/imprime     -> le PC confirme l'impression (le lot n'est plus proposé)
+// Jeton = HMAC(PROXY_KEY, « impression-usine-v1 »), 48 caractères ; mauvais jeton ou chemin = 404. N'ouvre rien d'autre
+// (ni achat, ni lecture d'envoi, ni connecteur). Les lots sont en mémoire : une passerelle redémarrée n'a plus rien à imprimer.
+const IMPRESSION_FENETRE_MS = 2 * 3600e3, IMPRESSION_EN_LIGNE_MS = 90e3;
+let impressionVu = 0;
+function jetonImpression() {
+  const e = (process.env.IMPRESSION_JETON || "").trim();
+  if (e) return e.length >= 32 ? e : null;
+  if (!PROXY_KEY) return null;
+  return crypto.createHmac("sha256", PROXY_KEY).update("impression-usine-v1").digest("hex").slice(0, 48);
+}
+function imprimanteUsine() { return { en_ligne: !!impressionVu && Date.now() - impressionVu < IMPRESSION_EN_LIGNE_MS, vu_a: impressionVu ? new Date(impressionVu).toISOString() : null }; }
+async function traiterImpression(req, res, chemin) {
+  const fin = (code, obj) => { res.writeHead(code, { "content-type": "application/json", "cache-control": "no-store" }); res.end(JSON.stringify(obj)); };
+  const jeton = jetonImpression();
+  const m = /^\/impression\/([A-Za-z0-9]{32,128})\/(?:(file)|(L\d{8}-\d{6}-[a-z0-9]{4})\.pdf|(L\d{8}-\d{6}-[a-z0-9]{4})\/imprime)$/.exec(chemin);
+  if (!jeton || !m || !egal(m[1], jeton)) return fin(404, { error: "introuvable" });
+  impressionVu = Date.now();
+  if (m[2]) {
+    if (req.method !== "GET") return fin(405, { error: "GET seulement" });
+    const prets = [...lots.values()].filter((l) => l.statut !== "en_cours" && l.pdf && !l.imprime_usine && Date.now() - (Date.parse(l.fin_a) || 0) < IMPRESSION_FENETRE_MS)
+      .map((l) => ({ lot_id: l.lot_id, pages: l.pages, octets: l.pdf.length, sha256: l.sha, fin_a: l.fin_a }));
+    return fin(200, { lots: prets });
+  }
+  const id = m[3] || m[4], l = lots.get(id);
+  if (!l || !l.pdf) return fin(404, { error: "lot inconnu ou PDF pas prêt" });
+  if (m[3]) {
+    if (req.method !== "GET") return fin(405, { error: "GET seulement" });
+    res.writeHead(200, { "content-type": "application/pdf", "content-length": String(l.pdf.length), "cache-control": "no-store" });
+    return res.end(l.pdf);
+  }
+  if (req.method !== "POST") return fin(405, { error: "POST seulement" });
+  if (!l.imprime_usine) { l.imprime_usine = maintenant(); journal(`lot ${id} imprimé à l'usine`); }
+  return fin(200, { ok: true, lot_id: id, imprime_a: l.imprime_usine });
 }
 
-module.exports = { traiter, etatPublic, jetonConnecteur, _test: { dateExpedition, signauxAdresse, civiqueEtRue, numeroCivique, rueEgale, villeNorm, propre, messageAchat, validerAjustements, ajuster, appelerOutil, lots } };
+
+module.exports = { traiter, traiterImpression, etatPublic, jetonConnecteur, jetonImpression, _test: { dateExpedition, signauxAdresse, civiqueEtRue, numeroCivique, rueEgale, villeNorm, propre, messageAchat, validerAjustements, ajuster, appelerOutil, lots } };
