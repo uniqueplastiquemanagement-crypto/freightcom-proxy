@@ -7,7 +7,7 @@ const crypto = require("crypto");
 const fs = require("fs");
 const pathMod = require("path");
 
-const SHA_MOTEUR = "f1ad22872f973c7ec227d25f980a68050482deae5b5c68b4aa4fa421611318e0";
+const SHA_MOTEUR = "8005ef905d7f34626cbd27c9bea8b701131ab0596c45d271ffff2eba68916c8e";
 let M = null, erreurMoteur = null;
 try {
   const f = pathMod.join(__dirname, "moteur_v5.js");
@@ -56,7 +56,7 @@ async function shopify(query, variables) {
   return j.data;
 }
 // Même lecture que la tâche d'achat (sans les numéros de suivi, inutiles ici).
-const CHAMPS_COMMANDE = "id name createdAt test cancelledAt tags displayFinancialStatus displayFulfillmentStatus discountCodes purchasingEntity { __typename } totalPriceSet { shopMoney { amount } } shippingAddress { name firstName lastName company address1 address2 city provinceCode zip countryCodeV2 phone validationResultSummary } shippingLines(first: 2) { nodes { title } } fulfillments(first: 5) { status } lineItems(first: 50) { nodes { title variantTitle quantity unfulfilledQuantity requiresShipping lineItemGroup { title quantity } variant { selectedOptions { name value } } } }";
+const CHAMPS_COMMANDE = "id name createdAt test cancelledAt tags note displayFinancialStatus displayFulfillmentStatus discountCodes purchasingEntity { __typename } totalPriceSet { shopMoney { amount } } shippingAddress { name firstName lastName company address1 address2 city provinceCode zip countryCodeV2 phone validationResultSummary } shippingLines(first: 2) { nodes { title } } fulfillments(first: 5) { status } lineItems(first: 50) { nodes { title variantTitle quantity unfulfilledQuantity requiresShipping lineItemGroup { title quantity } variant { selectedOptions { name value } } } }";
 const REQ_COMMANDES = `query($q: String!) { orders(first: 20, query: $q) { nodes { ${CHAMPS_COMMANDE} } } }`;
 const REQ_OUVERTES = `query($q: String!, $after: String) { orders(first: 50, after: $after, query: $q, sortKey: CREATED_AT) { pageInfo { hasNextPage endCursor } nodes { ${CHAMPS_COMMANDE} } } }`;
 const FILTRE_OUVERTES = "status:open AND (fulfillment_status:unfulfilled OR fulfillment_status:partial)";

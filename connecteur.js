@@ -21,7 +21,7 @@
 //   l'estimation de la table Shopify mesurée (table_shopify.js : même boîte, même poids, même région, même origine,
 //   transporteurs permis ; aucune lecture, aucun crédit) contre le prix Freightcom réel du même envoi ; Shopify n'est retenu
 //   sur estimation que s'il bat Freightcom d'au moins la marge (MARGE_ESTIMATION_CENTS) ; région, boîte, poids ou origine
-//   absents de la table = pas d'estimation (B2C : Freightcom ; B2B : Shopify, comme avant). Payée ou non,
+//   absents de la table = pas d'estimation : Freightcom seulement (B2C et B2B, depuis le 26 oct. 2026). Payée ou non,
 //   une vraie commande peut avoir son étiquette (26 oct. 2026) ;
 //   Shopify moins cher = rien n'est acheté ici (statut shopify_moins_cher, lien vers la commande) ;
 // - aucune écriture Shopify, aucun ramassage, aucun courriel ;
@@ -36,7 +36,7 @@ const { M, erreurMoteur, SHOP, appShopify, shopify, REQ_COMMANDES, cpNorm, maint
 let PDFDocument = null;
 try { ({ PDFDocument } = require("pdf-lib")); } catch { /* signalé par l'outil etat */ }
 
-const VERSION = "1.3.0";
+const VERSION = "1.4.0";
 const PORT = process.env.PORT || 10000;
 const PROXY_KEY = process.env.PROXY_KEY || "";
 const ENV = (process.env.FREIGHTCOM_ENV || "test").toLowerCase();
@@ -292,12 +292,12 @@ async function traiterLot(l, regle) {
       const planUn = { version_regle: rUn.version, achats_permis: rUn.achats_permis === true, commandes: [p] };
       const textes = (rs) => rs.map((r) => r.texte).join(" ; ");
       if (p.statut === "IGNORER") { l.resultats[no] = rien(textes(p.raisons || []) || "ignorée"); continue; }
-      // Estimation Shopify par la table mesurée (aucune lecture, aucun crédit). B2B sans estimation : Shopify, comme avant.
+      // Note de la commande « NE PAS EXPÉDIER » (souvent du B2B en attente) : jamais d'étiquette, même si la commande est dans le lot.
+      if (/ne\s+pas\s+exp[ée]di/i.test(String(c.note || ""))) { l.resultats[no] = rien("la note de la commande dit de ne pas expédier"); continue; }
+      // Estimation Shopify par la table mesurée (aucune lecture, aucun crédit). Sans estimation : Freightcom seulement.
+      // B2B : même chemin que le B2C depuis le 26 oct. 2026, 18 h 46 (Alexandre : « pareil comme en B2C », avec la règle des
+      // boîtes 26d) ; avant, un B2B sans estimation Shopify restait à étiqueter dans Shopify.
       const estSh = estimationShopify(p, rUn);
-      // B2B sans estimation Shopify : reste dans Shopify, comme avant. (Payée ou non n'empêche plus l'achat : 26 oct. 2026.)
-      if (p.segment === "B2B" && !estSh.ok) {
-        l.resultats[no] = rien(`commande B2B : étiquette par Shopify (${estSh.raison})`); continue;
-      }
       if (!p.a_soumissionner) { l.resultats[no] = rien(textes((p.raisons || []).filter((r) => !RAISONS_PERMISES.has(r.code))) || "à traiter à la main"); continue; }
       const bloquantesPlan = (p.raisons || []).filter((r) => !RAISONS_PERMISES.has(r.code));
       if (bloquantesPlan.length) { l.resultats[no] = rien(textes(bloquantesPlan)); continue; }

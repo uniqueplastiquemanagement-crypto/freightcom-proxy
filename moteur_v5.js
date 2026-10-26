@@ -272,6 +272,8 @@ function classerLigne(ligne, regle) {
   const complet = titre + " " + norm(ligne.variantTitle);
   const qte = Number(ligne.unfulfilledQuantity || 0);
   if (PREFIXES_B2B.some(p => titre.startsWith(p)) || /presentoir revendeur/.test(titre)) return classerB2B(ligne, titre, qte, regle);
+  // « Kit 3 grandeurs — 24 pinces revendeur » (B2B) : autant de petites, de moyennes et de grandes (8 + 8 + 8)
+  if (/^kit 3 grandeurs\b/.test(titre)) { const n = Number((titre.match(/(\d+)\s*pinces/) || [])[1] || 24), k = Math.round(n / 3) * qte; return { b2b: true, titre: ligne.title, qte, type: "pinces", pinces: { P: k, M: k, G: k }, note: `kit 3 grandeurs : ${k} petites, ${k} moyennes, ${k} grandes` }; }
   if (titre.startsWith("campagne de financement")) {
     if (/boite de ?12/.test(titre)) return { type: "boite_financement", qte, titre: ligne.title, contenu: { ...regle.financement_contenu } };
     if (/boite grandes/.test(titre) && /9 pinces/.test(titre)) return { type: "boite_financement", qte, titre: ligne.title, contenu: { P: 0, M: 1, G: 8 }, note: "boîte grandes (9 pinces) : 8 grandes + 1 moyenne, scellée" };
@@ -371,7 +373,9 @@ function planCommande(c, regle) {
   const nbFin = contenu.boite_financement;
   const seule = !estB2B && !nbFin && equiv > 0 ? choisirBoite(regle, pieces) : null;
   let colis = [], format = null;
-  if (!estB2B && nbFin > 0) {
+  // Boîtes de financement : empilées dans les cartons de financement, aussi pour un organisme B2B qui n'achète que des boîtes
+  // (ex. école, 48 boîtes) ; une commande B2B avec des pinces de distribution suit les gros formats.
+  if (nbFin > 0 && (!estB2B || !classes.some(x => x.b2b))) {
     const f = financementColis(regle, nbFin, finPieces, vrac);
     if (!f) raisons.push(R("AUCUNE_BOITE", `boîtes de financement : aucun carton prévu pour ce nombre, à traiter à la main`));
     else { colis = f.colis; notes.push(f.note); }
@@ -382,7 +386,10 @@ function planCommande(c, regle) {
     format = grosFormat(regle, Math.max(equiv, 1), presentoirs > 0);
     if (!format) raisons.push(R("AUCUNE_BOITE", `commande trop grosse (${equiv} pinces) : plus de ${LIMITES.COLIS_MAX} cartons, à traiter à la main`));
     else {
-      colis = format.map(f => ({ boite: f.boite.nom, longueur_po: f.boite.longueur_po, largeur_po: f.boite.largeur_po, hauteur_po: f.boite.hauteur_po, pinces: f.pinces, avec_presentoir: f.avec, pieces: null, poids_g: Math.round(f.kg * 1000), poids_lb: Math.max(1, Math.ceil(f.kg * 1000 / G_PAR_LB)), consigne: f.consigne }));
+      // Poids : celui du tableau des cartons, ou le poids réel des pinces s'il est plus lourd (ex. 90 grandes à 60 g + carton > 5 kg)
+      const gPinces = ["P", "M", "G"].reduce((s, k) => s + pieces[k] * regle.poids_g[k], 0);
+      colis = format.map(f => { const g = Math.max(Math.round(f.kg * 1000), Math.round(gPinces * f.pinces / Math.max(equiv, 1)) + (f.boite.poids_vide_g || 0));
+        return { boite: f.boite.nom, longueur_po: f.boite.longueur_po, largeur_po: f.boite.largeur_po, hauteur_po: f.boite.hauteur_po, pinces: f.pinces, avec_presentoir: f.avec, pieces: null, poids_g: g, poids_lb: Math.max(1, Math.ceil(g / G_PAR_LB)), consigne: f.consigne }; });
       notes.push(`gros format (${equiv} pinces${presentoirs ? `, ${presentoirs} présentoir(s)` : ""}) : ` + format.map(f => `${f.boite.nom} pour ${f.pinces} pinces ${f.avec ? "avec" : "sans"} présentoir — ${f.consigne}`).join(" + "));
       for (const f of format) if (f.a_confirmer) notes.push(`carton ${f.boite.nom} (${f.pinces} pinces ${f.avec ? "avec" : "sans"} présentoir) : ${f.a_confirmer}`);
     }
