@@ -36,7 +36,7 @@ const { M, erreurMoteur, SHOP, appShopify, shopify, REQ_COMMANDES, cpNorm, maint
 let PDFDocument = null;
 try { ({ PDFDocument } = require("pdf-lib")); } catch { /* signalé par l'outil etat */ }
 
-const VERSION = "1.4.1";
+const VERSION = "1.4.2";
 const PORT = process.env.PORT || 10000;
 const PROXY_KEY = process.env.PROXY_KEY || "";
 const ENV = (process.env.FREIGHTCOM_ENV || "test").toLowerCase();
@@ -61,6 +61,14 @@ const SERVICES = ["ups.standard", "ups.ground", "ups.expedited", "ups.express", 
 const RAISONS_PERMISES = new Set(["REGLE_ESSAI", "INCOMPLET", "SEUIL", "PAIEMENT"]);
 const PAUSE = Math.max(10, Number(process.env.CONNECTEUR_PAUSE_MS || 5000)); // attente entre deux lectures chez Freightcom
 const RE_LOT = /^L\d{8}-\d{6}-[a-z0-9]{4}$/;
+// Nom du PDF d'un lot pour le PC de l'usine (Alexandre, 27 oct. 2026 : « 27oct.11h59-MIMI-CLAUDE-étiquettesd'expédition »).
+// Facultatif : un nom absent ou douteux n'empêche jamais l'achat, le PC reprend alors « etiquettes_<lot>.pdf ».
+function nomFichier(v) {
+  if (typeof v !== "string") return null;
+  const n = v.normalize("NFC").trim();
+  if (n.length < 5 || n.length > 120 || !/\.pdf$/i.test(n) || /^[.\s-]/.test(n) || n.includes("..") || /[\\/:*?"<>|\u0000-\u001f\u007f]/.test(n)) return null;
+  return n;
+}
 // Table des prix Shopify mesurés (fichier table_shopify.json livré avec le code). Absente ou invalide : pas d'estimation.
 let TABLE_SH = null, ERREUR_TABLE = null;
 if (!TS) ERREUR_TABLE = "module table_shopify.js absent ou illisible";
@@ -448,7 +456,8 @@ const OUTILS = [
       lot_id: { type: "string", pattern: "^L\\d{8}-\\d{6}-[a-z0-9]{4}$", description: "identifiant du lot écrit par le Poste" },
       commandes: { type: "array", minItems: 1, maxItems: MAX_LOT, items: { type: "string", pattern: "^\\d{3,7}$" }, description: "numéros de commande Shopify, sans #, dans l'ordre d'impression" },
       regle: { type: "object", description: "règle des boîtes du Poste (Drive), validée par le moteur" },
-      ajustements: { type: "object", description: "réponses des employés par numéro de commande : {tailles: {titre: P|M|G}, compositions: {titre: {P, M, G}}}, comme dans le Poste" } } } },
+      ajustements: { type: "object", description: "réponses des employés par numéro de commande : {tailles: {titre: P|M|G}, compositions: {titre: {P, M, G}}}, comme dans le Poste" },
+      nom_fichier: { type: "string", minLength: 5, maxLength: 120, description: "nom du PDF du lot pour le PC de l'usine, ex. « 27oct.11h59-MIMI-CLAUDE-étiquettesd'expédition.pdf » (date et heure - qui emballe - CLAUDE - ce que c'est)" } } } },
   { name: "tarifs_shopify", description: "Statut des prix Shopify lus dans le calculateur (contre-vérifiés ou non) pour des commandes du Poste, avec le moins cher permis. Lecture seulement, sans adresse.",
     annotations: { title: "Prix Shopify contre-vérifiés", readOnlyHint: true, openWorldHint: false },
     inputSchema: { type: "object", additionalProperties: false, required: ["commandes"], properties: {
@@ -505,7 +514,7 @@ async function appelerOutil(nom, args) {
     try { M.validerRegle(regle); } catch (e) { throw new Error("règle des boîtes refusée : " + String(e.message || e).slice(0, 160)); }
     const ajustements = validerAjustements(args.ajustements, nos);
     if (!appShopify()) throw new Error("app Shopify pas encore branchée sur la passerelle (variables SHOPIFY_* sur Render)");
-    const l = { lot_id: id, commandes: nos, ajustements, statut: "en_cours", debut_a: maintenant(), cree: Date.now(), resultats: {}, adresses: {}, pdfs: [], pdf: null, parties: [], pages: 0, cout: 0 };
+    const l = { lot_id: id, commandes: nos, ajustements, nom_fichier: nomFichier(args.nom_fichier), statut: "en_cours", debut_a: maintenant(), cree: Date.now(), resultats: {}, adresses: {}, pdfs: [], pdf: null, parties: [], pages: 0, cout: 0 };
     lots.set(id, l);
     journal(`lot ${id} lancé : ${nos.length} commande(s)`);
     traiterLot(l, JSON.parse(JSON.stringify(regle)));
@@ -651,7 +660,7 @@ async function traiterImpression(req, res, chemin) {
   if (m[2]) {
     if (req.method !== "GET") return fin(405, { error: "GET seulement" });
     const prets = [...lots.values()].filter((l) => l.statut !== "en_cours" && l.pdf && !l.imprime_usine && Date.now() - (Date.parse(l.fin_a) || 0) < IMPRESSION_FENETRE_MS)
-      .map((l) => ({ lot_id: l.lot_id, pages: l.pages, octets: l.pdf.length, sha256: l.sha, fin_a: l.fin_a }));
+      .map((l) => ({ lot_id: l.lot_id, nom: l.nom_fichier || null, pages: l.pages, octets: l.pdf.length, sha256: l.sha, fin_a: l.fin_a }));
     const documents = docsAImprimer().map((d) => ({ doc_id: d.doc_id, type: d.type, lot: d.lot || null, pages: d.pages || null, octets: d.html.length, sha256: d.sha, cree_a: d.cree_a }));
     return fin(200, { lots: prets, documents });
   }
@@ -682,4 +691,4 @@ async function traiterImpression(req, res, chemin) {
 }
 
 
-module.exports = { traiter, traiterImpression, etatPublic, jetonConnecteur, jetonImpression, _test: { docs, recevoirDocument, dateExpedition, signauxAdresse, civiqueEtRue, numeroCivique, rueEgale, villeNorm, propre, messageAchat, validerAjustements, ajuster, appelerOutil, lots } };
+module.exports = { traiter, traiterImpression, etatPublic, jetonConnecteur, jetonImpression, _test: { docs, recevoirDocument, nomFichier, dateExpedition, signauxAdresse, civiqueEtRue, numeroCivique, rueEgale, villeNorm, propre, messageAchat, validerAjustements, ajuster, appelerOutil, lots } };
