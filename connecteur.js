@@ -36,7 +36,7 @@ const { M, erreurMoteur, SHOP, appShopify, shopify, REQ_COMMANDES, cpNorm, maint
 let PDFDocument = null;
 try { ({ PDFDocument } = require("pdf-lib")); } catch { /* signalé par l'outil etat */ }
 
-const VERSION = "1.4.2";
+const VERSION = "1.4.3";
 const PORT = process.env.PORT || 10000;
 const PROXY_KEY = process.env.PROXY_KEY || "";
 const ENV = (process.env.FREIGHTCOM_ENV || "test").toLowerCase();
@@ -375,8 +375,12 @@ async function traiterLot(l, regle) {
       det.origin.contact_name = "Unique Plastique";
       det.origin.phone_number = { number: TEL_ORIGINE, extension: "" };
       det.origin.email_addresses = [];
-      const nom = String(a.name || a.company || "").replace(/\s+/g, " ").trim().slice(0, 60);
-      det.destination.name = nom; det.destination.contact_name = nom;
+      // Destinataire (Alexandre, 28 oct. 2026) : le commerce d'abord. Avec une entreprise dans l'adresse Shopify (B2B : « Pharmaplus 123 »),
+      // name = l'entreprise et contact_name = la personne ; Postes Canada et GLS impriment les deux (« Attn: Jane Doe » puis « Pharmaplus 123 »).
+      const net = (v) => String(v || "").replace(/\s+/g, " ").trim().slice(0, 60);
+      const personne = net(a.name || [a.firstName, a.lastName].filter(Boolean).join(" "));
+      const entreprise = net(a.company).length > 1 ? net(a.company) : "";
+      det.destination.name = entreprise || personne; det.destination.contact_name = personne || entreprise;
       det.destination.phone_number = { number: String(a.phone || "").replace(/\D/g, "").slice(-10) || TEL_ORIGINE, extension: "" };
       det.destination.email_addresses = [];
       det.destination.signature_requirement = "not-required";
