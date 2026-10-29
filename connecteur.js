@@ -36,7 +36,7 @@ const { M, erreurMoteur, SHOP, appShopify, shopify, REQ_COMMANDES, cpNorm, maint
 let PDFDocument = null;
 try { ({ PDFDocument } = require("pdf-lib")); } catch { /* signalé par l'outil etat */ }
 
-const VERSION = "1.4.4";
+const VERSION = "1.4.5";
 const PORT = process.env.PORT || 10000;
 const PROXY_KEY = process.env.PROXY_KEY || "";
 const ENV = (process.env.FREIGHTCOM_ENV || "test").toLowerCase();
@@ -472,11 +472,11 @@ const OUTILS = [
   { name: "pdf_lot", description: "Une partie (base64) du PDF 4×6 fusionné d'un lot terminé. Parties numérotées à partir de 0 ; le nombre de parties est dans etat_lot.",
     annotations: { title: "PDF des étiquettes", readOnlyHint: true, openWorldHint: false },
     inputSchema: { type: "object", additionalProperties: false, required: ["lot_id", "partie"], properties: { lot_id: { type: "string", pattern: "^L\\d{8}-\\d{6}-[a-z0-9]{4}$" }, partie: { type: "integer", minimum: 0, maximum: 200 } } } },
-  { name: "imprimer_document", description: "Dépose un document dans la file de l'imprimante de l'usine ; le PC de l'usine le prend et l'imprime sans clic. Type « bons_b2b » : bons d'expédition B2B ou B2C, document HTML lettre simple (sans script, image, svg ni lien externe), imprimé sur l'imprimante à bons de l'usine (Brother HL-L5200DW, noir et blanc). Type « etiquettes » : PDF 4×6 d'un ancien lot (base64), réimprimé sur l'imprimante d'étiquettes (POLONO PL50E). Envoyé en parties (≤ 300 Ko chacune) ; le document est prêt quand toutes les parties sont reçues. N'achète rien et ne lit rien dans Shopify.",
+  { name: "imprimer_document", description: "Dépose un document dans la file de l'imprimante de l'usine ; le PC de l'usine le prend et l'imprime sans clic. Type « bons_b2b » : bons d'expédition B2B ou B2C, document HTML lettre simple (sans script, image, svg ni lien externe), imprimé en couleur sur l'imprimante à bons de l'usine (Brother MFC-L3720CDW). Type « etiquettes » : PDF 4×6 d'un ancien lot (base64), réimprimé sur l'imprimante d'étiquettes (POLONO PL50E). Envoyé en parties (≤ 300 Ko chacune) ; le document est prêt quand toutes les parties sont reçues. N'achète rien et ne lit rien dans Shopify.",
     annotations: { title: "Imprimer à l'usine", readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     inputSchema: { type: "object", additionalProperties: false, required: ["doc_id", "type", "partie", "parties"], properties: {
       doc_id: { type: "string", pattern: "^D\\d{8}-\\d{6}-[a-z0-9]{4}$", description: "identifiant du document écrit par le Poste" },
-      type: { type: "string", enum: ["bons_b2b", "etiquettes"], description: "bons_b2b : bons d'expédition (B2B ou B2C) en HTML pour la Brother HL-L5200DW ; etiquettes : PDF 4×6 pour l'imprimante d'étiquettes PL50E" },
+      type: { type: "string", enum: ["bons_b2b", "etiquettes"], description: "bons_b2b : bons d'expédition (B2B ou B2C) en HTML pour la Brother MFC-L3720CDW (couleur) ; etiquettes : PDF 4×6 pour l'imprimante d'étiquettes PL50E" },
       lot: { type: "string", pattern: "^L\\d{8}-\\d{6}-[a-z0-9]{4}$", description: "etiquettes : le lot d'origine (pour le journal)" },
       partie: { type: "integer", minimum: 0, maximum: 19 }, parties: { type: "integer", minimum: 1, maximum: 20 },
       html: { type: "string", minLength: 1, maxLength: 307200, description: "bons_b2b : cette partie du document HTML (bons d'expédition)" },
@@ -603,7 +603,7 @@ function jetonImpression() {
 }
 // Documents (en mémoire, 2 h au plus, 40 au plus) :
 //  - bons_b2b : bons d'expédition B2B et B2C, HTML simple seulement (script et ressources externes refusés ici) ; le PC
-//    l'ouvre dans Edge, en fait un PDF et l'imprime sur la Brother HL-L5200DW (programme du PC version 5, 29 oct. 2026) ;
+//    l'ouvre dans Edge, en fait un PDF et l'imprime en couleur sur la Brother MFC-L3720CDW (programme du PC 5.2, 29 oct. 2026) ;
 //  - etiquettes : le PDF 4×6 d'un ancien lot (réimpression demandée dans le Poste) ; seulement des pages 4×6, pour
 //    l'imprimante d'étiquettes (POLONO PL50E depuis le 29 oct. 2026). Rien n'est racheté.
 const RE_DOC = /^D\d{8}-\d{6}-[a-z0-9]{4}$/, DOC_TYPES = ["bons_b2b", "etiquettes"], DOC_MAX_OCTETS = 4 * 1024 * 1024, DOC_PARTIE_MAX = 300 * 1024, DOCS_MAX = 40;
