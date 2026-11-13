@@ -197,6 +197,13 @@ function validerRegle(r) {
     if (!(Number.isInteger(g.pinces) && g.pinces > 0)) err.push("gros_formats : pinces doit être un entier positif");
     for (const k of ["avec", "sans"]) { const v = g[k]; if (!v || !cartons.has(v.carton)) err.push(`gros_formats ${g.pinces} ${k} : carton inconnu`); else if (!pos(v.kg)) err.push(`gros_formats ${g.pinces} ${k} : poids kg manquant`); }
   }
+  const tn = r.tours_noel;   // la tour de Noël (12 nov. 2026)
+  if (tn != null) {
+    if (!(Number.isInteger(tn.cannes_par_tour) && tn.cannes_par_tour > 0)) err.push("tours_noel.cannes_par_tour doit être un entier positif");
+    for (const k of ["une", "une_plus", "deux"]) { const v = tn[k]; if (!v || !cartons.has(v.carton)) err.push(`tours_noel.${k} : carton inconnu`); else if (!pos(v.kg)) err.push(`tours_noel.${k} : poids kg manquant`); }
+    for (const k of ["une", "une_plus"]) if (tn[k] && !(Number.isInteger(tn[k].pinces_max) && tn[k].pinces_max >= 0)) err.push(`tours_noel.${k}.pinces_max doit être un entier ≥ 0`);
+    if (tn.une && tn.une_plus && !(tn.une_plus.pinces_max > tn.une.pinces_max)) err.push("tours_noel : une_plus.pinces_max doit dépasser une.pinces_max");
+  }
   if (err.length) throw new Error("Règle des boîtes invalide : " + err.join(" ; "));
 }
 const achatsPermis = r => r && r.achats_permis === true;
@@ -272,6 +279,8 @@ function classerLigne(ligne, regle) {
   const complet = titre + " " + norm(ligne.variantTitle);
   const qte = Number(ligne.unfulfilledQuantity || 0);
   if (PREFIXES_B2B.some(p => titre.startsWith(p)) || /presentoir revendeur/.test(titre)) return classerB2B(ligne, titre, qte, regle);
+  // « La tour de Noël — 24 cannes revendeur » (B2B, 12 nov. 2026) : 24 cannes (12 moyennes + 12 grandes) + un plateau, emballée à part (tours_noel)
+  if (/^(la )?tour de noel\b/.test(titre) || /^TOUR-NOEL/i.test(String(ligne.sku || ""))) { const n = Number((titre.match(/(\d+)\s*cannes?/) || [])[1] || (regle.tours_noel && regle.tours_noel.cannes_par_tour) || 24); return { b2b: true, titre: ligne.title, qte, type: "tour", cannes: n * qte, note: `tour de Noël : ${n} cannes et un plateau par tour` }; }
   // « Kit 3 grandeurs — 24 pinces revendeur » (B2B) : autant de petites, de moyennes et de grandes (8 + 8 + 8)
   if (/^kit 3 grandeurs\b/.test(titre)) { const n = Number((titre.match(/(\d+)\s*pinces/) || [])[1] || 24), k = Math.round(n / 3) * qte; return { b2b: true, titre: ligne.title, qte, type: "pinces", pinces: { P: k, M: k, G: k }, note: `kit 3 grandeurs : ${k} petites, ${k} moyennes, ${k} grandes` }; }
   if (titre.startsWith("campagne de financement")) {
@@ -369,27 +378,53 @@ function planCommande(c, regle) {
   const pieces = { P: vrac.P + finPieces.P, M: vrac.M + finPieces.M, G: vrac.G + finPieces.G };
   const equiv = pieces.P + pieces.M + pieces.G;
   const presentoirs = classes.reduce((s, x) => s + (x.presentoirs || 0), 0);
-  if (!equiv && !presentoirs && !inconnus.length && !kitsInconnus.length) raisons.push(R("AUCUNE_PINCE", "aucune pince ni présentoir à expédier : à vérifier à la main"));
+  const tours = classes.filter(x => x.type === "tour").reduce((s, x) => s + x.qte, 0);
+  if (!equiv && !presentoirs && !tours && !inconnus.length && !kitsInconnus.length) raisons.push(R("AUCUNE_PINCE", "aucune pince ni présentoir à expédier : à vérifier à la main"));
   const nbFin = contenu.boite_financement;
-  const seule = !estB2B && !nbFin && equiv > 0 ? choisirBoite(regle, pieces) : null;
+  const seule = !estB2B && !nbFin && equiv > 0 && !tours ? choisirBoite(regle, pieces) : null;
   let colis = [], format = null;
+  // La tour de Noël (Alexandre, 12 nov. 2026) : 1 tour = 20x10x6, 3,4 kg, jusqu'à 16 pinces de plus (poids ajouté) ;
+  // 1 tour + plus de 16 pinces = 20x14x8, 4 kg ; 2 tours = 14x14x14, 6,8 kg. Au-delà : des 14x14x14 de 2 tours, puis une boîte d'une tour.
+  // Les pinces qui ne vont pas avec une tour (2 tours, ou trop de pinces, ou un présentoir de comptoir) partent dans leur carton habituel.
+  let pincesAvecTour = false;
+  if (tours > 0) {
+    const tn = regle.tours_noel;
+    const carton = (v) => (regle.cartons || []).find(c => c.nom === v.carton);
+    if (!tn || !carton(tn.une) || !carton(tn.une_plus) || !carton(tn.deux)) raisons.push(R("AUCUNE_BOITE", "tour de Noël : règle des boîtes sans tours_noel, à traiter à la main"));
+    else {
+      const gPinces = ["P", "M", "G"].reduce((s, k) => s + pieces[k] * regle.poids_g[k], 0);
+      const boiteTour = (v, g, n, cons) => { const b = carton(v); return { boite: b.nom, longueur_po: b.longueur_po, largeur_po: b.largeur_po, hauteur_po: b.hauteur_po, tours: n, pieces: null, poids_g: g, poids_lb: Math.max(1, Math.ceil(g / G_PAR_LB)), consigne: cons }; };
+      for (let i = 0; i < Math.floor(tours / 2); i++) colis.push(boiteTour(tn.deux, Math.round(tn.deux.kg * 1000), 2, tn.deux.consigne));
+      if (tours % 2) {
+        const peut = !nbFin && !presentoirs;
+        if (peut && equiv <= tn.une.pinces_max) { colis.push(boiteTour(tn.une, Math.round(tn.une.kg * 1000 + gPinces), 1, tn.une.consigne + (equiv ? ` (${equiv} pinces ajoutées)` : ""))); pincesAvecTour = equiv > 0; }
+        else if (peut && equiv <= tn.une_plus.pinces_max) { colis.push(boiteTour(tn.une_plus, Math.max(Math.round(tn.une_plus.kg * 1000), Math.round(tn.une.kg * 1000 + gPinces)), 1, tn.une_plus.consigne + ` (${equiv} pinces ajoutées)`)); pincesAvecTour = true; if (tn.une_plus.a_confirmer) notes.push("tour de Noël : " + tn.une_plus.a_confirmer); }
+        else colis.push(boiteTour(tn.une, Math.round(tn.une.kg * 1000), 1, tn.une.consigne));
+      }
+      notes.push(`tour de Noël (${tours} tour${tours > 1 ? "s" : ""}) : ` + colis.map(c => `${c.boite} pour ${c.tours} tour${c.tours > 1 ? "s" : ""} — ${c.consigne}`).join(" + "));
+      if (colis.length > LIMITES.COLIS_MAX) { colis = []; raisons.push(R("AUCUNE_BOITE", `${tours} tours de Noël : plus de ${LIMITES.COLIS_MAX} boîtes, à traiter à la main`)); }
+    }
+  }
   // Boîtes de financement : empilées dans les cartons de financement, aussi pour un organisme B2B qui n'achète que des boîtes
   // (ex. école, 48 boîtes) ; une commande B2B avec des pinces de distribution suit les gros formats.
   if (nbFin > 0 && (!estB2B || !classes.some(x => x.b2b))) {
     const f = financementColis(regle, nbFin, finPieces, vrac);
     if (!f) raisons.push(R("AUCUNE_BOITE", `boîtes de financement : aucun carton prévu pour ce nombre, à traiter à la main`));
     else { colis = f.colis; notes.push(f.note); }
+  } else if (pincesAvecTour) {
+    // rien de plus : les pinces voyagent avec la tour
   } else if (seule) {
     const g = ["P", "M", "G"].reduce((s, k) => s + pieces[k] * regle.poids_g[k], 0) + seule.poids_vide_g;
     colis = [{ boite: seule.nom, longueur_po: seule.longueur_po, largeur_po: seule.largeur_po, hauteur_po: seule.hauteur_po, pieces, poids_g: g, poids_lb: Math.max(1, Math.ceil(g / G_PAR_LB)) }];
   } else if (equiv > 0 || presentoirs > 0) {
     format = grosFormat(regle, Math.max(equiv, 1), presentoirs > 0);
-    if (!format) raisons.push(R("AUCUNE_BOITE", `commande trop grosse (${equiv} pinces) : plus de ${LIMITES.COLIS_MAX} cartons, à traiter à la main`));
+    if (format && colis.length + format.length > LIMITES.COLIS_MAX) format = null;
+    if (!format) raisons.push(R("AUCUNE_BOITE", `commande trop grosse (${equiv} pinces${tours ? ` et ${tours} tour(s) de Noël` : ""}) : plus de ${LIMITES.COLIS_MAX} cartons, à traiter à la main`));
     else {
       // Poids : celui du tableau des cartons, ou le poids réel des pinces s'il est plus lourd (ex. 90 grandes à 60 g + carton > 5 kg)
       const gPinces = ["P", "M", "G"].reduce((s, k) => s + pieces[k] * regle.poids_g[k], 0);
-      colis = format.map(f => { const g = Math.max(Math.round(f.kg * 1000), Math.round(gPinces * f.pinces / Math.max(equiv, 1)) + (f.boite.poids_vide_g || 0));
-        return { boite: f.boite.nom, longueur_po: f.boite.longueur_po, largeur_po: f.boite.largeur_po, hauteur_po: f.boite.hauteur_po, pinces: f.pinces, avec_presentoir: f.avec, pieces: null, poids_g: g, poids_lb: Math.max(1, Math.ceil(g / G_PAR_LB)), consigne: f.consigne }; });
+      colis = colis.concat(format.map(f => { const g = Math.max(Math.round(f.kg * 1000), Math.round(gPinces * f.pinces / Math.max(equiv, 1)) + (f.boite.poids_vide_g || 0));
+        return { boite: f.boite.nom, longueur_po: f.boite.longueur_po, largeur_po: f.boite.largeur_po, hauteur_po: f.boite.hauteur_po, pinces: f.pinces, avec_presentoir: f.avec, pieces: null, poids_g: g, poids_lb: Math.max(1, Math.ceil(g / G_PAR_LB)), consigne: f.consigne }; }));
       notes.push(`gros format (${equiv} pinces${presentoirs ? `, ${presentoirs} présentoir(s)` : ""}) : ` + format.map(f => `${f.boite.nom} pour ${f.pinces} pinces ${f.avec ? "avec" : "sans"} présentoir — ${f.consigne}`).join(" + "));
       for (const f of format) if (f.a_confirmer) notes.push(`carton ${f.boite.nom} (${f.pinces} pinces ${f.avec ? "avec" : "sans"} présentoir) : ${f.a_confirmer}`);
     }
@@ -405,7 +440,7 @@ function planCommande(c, regle) {
   const dest = a ? { ville: a.city, province: a.provinceCode, code_postal: cpNorm(a.zip), pays: a.countryCodeV2 || null, type_lieu: a.company ? "entreprise" : "residence" } : null;
   const aSoumissionner = !!(dest && boite && !raisons.some(r => CODES_SANS_SOUMISSION.has(r.code)));
   return {
-    no, id: c.id, cree_le: c.createdAt, segment: estB2B ? "B2B" : "B2C", b2b: !!estB2B, presentoirs, express,
+    no, id: c.id, cree_le: c.createdAt, segment: estB2B ? "B2B" : "B2C", b2b: !!estB2B, presentoirs, express, tours,
     statut: raisons.length ? "SIGNALER" : "A_COMPARER", raisons, notes,
     destination: dest, contenu, pieces, nb_pinces: equiv,
     boite: boite ? { nom: boite.nom, nom_shopify: boite.nom_shopify || boite.nom, longueur_po: boite.longueur_po, largeur_po: boite.largeur_po, hauteur_po: boite.hauteur_po } : null,
