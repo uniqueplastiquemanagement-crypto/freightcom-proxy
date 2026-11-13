@@ -36,7 +36,7 @@ const { M, erreurMoteur, SHOP, appShopify, shopify, REQ_COMMANDES, cpNorm, maint
 let PDFDocument = null;
 try { ({ PDFDocument } = require("pdf-lib")); } catch { /* signalé par l'outil etat */ }
 
-const VERSION = "1.4.7";
+const VERSION = "1.4.8";
 const PORT = process.env.PORT || 10000;
 const PROXY_KEY = process.env.PROXY_KEY || "";
 const ENV = (process.env.FREIGHTCOM_ENV || "test").toLowerCase();
@@ -302,7 +302,8 @@ async function traiterLot(l, regle) {
       const textes = (rs) => rs.map((r) => r.texte).join(" ; ");
       if (p.statut === "IGNORER") { l.resultats[no] = rien(textes(p.raisons || []) || "ignorée"); continue; }
       // Note de la commande « NE PAS EXPÉDIER » (souvent du B2B en attente) : jamais d'étiquette, même si la commande est dans le lot.
-      if (/ne\s+pas\s+exp[ée]di/i.test(String(c.note || ""))) { l.resultats[no] = rien("la note de la commande dit de ne pas expédier"); continue; }
+      // Aussi « ATTENDRE LE OK … AVANT D'ENVOYER » (13 nov. 2026, #11357) : même règle que le Poste (enAttente).
+      if (/ne\s+pas\s+exp[ée]di|^\s*en attente\b|attendre\s+(?:le\s+|la\s+|l['’]\s*)?(?:ok|go|feu vert|accord|confirmation|approbation|paiement)\b|avant\s+d['’]\s*(?:envoyer|exp[ée]dier)/im.test(String(c.note || ""))) { l.resultats[no] = rien("la note de la commande dit de ne pas expédier ou d'attendre un OK"); continue; }
       // Estimation Shopify par la table mesurée (aucune lecture, aucun crédit). Sans estimation : Freightcom seulement.
       // B2B : même chemin que le B2C depuis le 26 oct. 2026, 18 h 46 (Alexandre : « pareil comme en B2C », avec la règle des
       // boîtes 26d) ; avant, un B2B sans estimation Shopify restait à étiqueter dans Shopify.
