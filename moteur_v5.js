@@ -384,7 +384,7 @@ function planCommande(c, regle) {
   const seule = !estB2B && !nbFin && equiv > 0 && !tours ? choisirBoite(regle, pieces) : null;
   let colis = [], format = null;
   // La tour de Noël (Alexandre, 12 nov. 2026) : 1 tour = 20x10x6, 3,4 kg, jusqu'à 16 pinces de plus (poids ajouté) ;
-  // 1 tour + plus de 16 pinces = 20x14x8, 4 kg ; 2 tours = 14x14x14, 6,8 kg. Au-delà : des 14x14x14 de 2 tours, puis une boîte d'une tour.
+  // 1 tour + plus de 16 pinces = 20x14x8, 4 kg ; 2 tours (avec leurs 2 plateaux) = 16x16x16 (tours_noel.deux), 6,8 kg. Au-delà : des boîtes de 2 tours, puis une boîte d'une tour.
   // Les pinces qui ne vont pas avec une tour (2 tours, ou trop de pinces, ou un présentoir de comptoir) partent dans leur carton habituel.
   let pincesAvecTour = false;
   if (tours > 0) {
