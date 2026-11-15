@@ -336,7 +336,9 @@ function classerLigne(ligne, regle) {
 }
 
 // ---------- Adresse : ce qui sera tapé dans le calculateur ----------
-const MOTS_SUSPECTS = /\b(claude|assistant|consigne|instruction|ignore|ignorez|system|prompt|achete|achetez|envoie|envoyez)\b|https?:|www\.|[<>{}]/;
+// « claude » n'est plus un mot suspect (Alexandre, 15 nov. 2026) : Claude, Marie-Claude, Jean-Claude, Saint-Claude, rue Claude-Champagne
+// sont des noms et des adresses ordinaires au Québec. Les autres mots, les liens, les < > { }, les sauts de ligne et les champs de plus de 80 caractères restent bloqués.
+const MOTS_SUSPECTS = /\b(assistant|consigne|instruction|ignore|ignorez|system|prompt|achete|achetez|envoie|envoyez)\b|https?:|www\.|[<>{}]/;
 function adresseSuspecte(a) {
   for (const k of ["name", "company", "address1", "address2", "city", "zip", "phone", "provinceCode"]) {
     const v = a[k];
