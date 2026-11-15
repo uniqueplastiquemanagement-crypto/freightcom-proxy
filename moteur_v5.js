@@ -213,6 +213,11 @@ function validerRegle(r) {
     if (!bs.length) err.push("cannes_detail.boites manquant");
     bs.forEach((b, i) => { if (!(Number.isInteger(b.cannes) && b.cannes > 0) || !cartons.has(b.carton)) err.push(`cannes_detail.boites[${i}] : nombre de cannes ou carton invalide`); else if (i && !(b.cannes > bs[i - 1].cannes)) err.push("cannes_detail.boites : les nombres de cannes doivent monter"); });
   }
+  const usb = r.une_seule_boite;   // une seule boîte par commande (15 nov. 2026)
+  if (usb != null) {
+    if (typeof usb.actif !== "boolean") err.push("une_seule_boite.actif doit être true ou false");
+    if (!Array.isArray(usb.cartons_tours) || !usb.cartons_tours.length || usb.cartons_tours.some((n) => !cartons.has(n))) err.push("une_seule_boite.cartons_tours : cartons inconnus");
+  }
   const cn = r.cannes_noel;   // cannes de Noël revendeur (12 nov. 2026)
   if (cn != null) {
     for (const k of ["P", "M", "G"]) if (!(cn.poids_g && pos(cn.poids_g[k]))) err.push(`cannes_noel.poids_g.${k} doit être un nombre positif`);
@@ -491,6 +496,25 @@ function planCommande(c, regle) {
       notes.push(`gros format (${equiv} pinces${nbCannes ? ` + ${nbCannes} cannes = place de ${place} pinces` : ""}${presentoirs ? `, ${presentoirs} présentoir(s)` : ""}) : ` + format.map(f => `${f.boite.nom} pour ${f.pinces} pinces ${f.avec ? "avec" : "sans"} présentoir — ${f.consigne}`).join(" + "));
       for (const f of format) if (f.a_confirmer) notes.push(`carton ${f.boite.nom} (${f.pinces} pinces ${f.avec ? "avec" : "sans"} présentoir) : ${f.a_confirmer}`);
     }
+  }
+  // Une seule boîte par commande (Alexandre, 15 nov. 2026 : « arrête de faire deux étiquettes, on arrive toujours » ; « à faire entrer le tout
+  // dans une boîte, il faut changer le format ») : plusieurs colis prévus → un seul, dans le plus petit carton dont le volume couvre celui des
+  // colis prévus. Avec une tour de Noël : seulement les cartons de une_seule_boite.cartons_tours ; aucun assez grand → le plus grand d'entre eux
+  // (« on arrive toujours »). Sans tour, si aucun carton n'est assez grand (ex. 48 boîtes de financement, 300 pinces), les colis restent séparés.
+  // 3 tours et plus : toujours plusieurs boîtes (2 tours remplissent déjà la 16x16x16).
+  const usb = regle.une_seule_boite;
+  if (usb && usb.actif === true && colis.length > 1 && tours <= 2) {
+    const vol = (x) => x.longueur_po * x.largeur_po * x.hauteur_po;
+    const vide = (nom) => { const b = [...(regle.cartons || []), ...(regle.boites || [])].find((x) => x.nom === nom); return b ? (b.poids_vide_g || 0) : 0; };
+    const besoin = colis.reduce((s, x) => s + vol(x), 0);
+    const permis = (regle.cartons || []).filter((x) => !tours || (usb.cartons_tours || []).includes(x.nom)).sort((x, y) => vol(x) - vol(y));
+    const choix = permis.find((x) => vol(x) >= besoin) || (tours ? permis[permis.length - 1] : null);
+    if (choix) {
+      const avant = colis.map((x) => x.boite).join(" + ");
+      const g = colis.reduce((s, x) => s + x.poids_g - vide(x.boite), 0) + (choix.poids_vide_g || 0);
+      colis = [{ boite: choix.nom, longueur_po: choix.longueur_po, largeur_po: choix.largeur_po, hauteur_po: choix.hauteur_po, pieces: null, poids_g: g, poids_lb: Math.max(1, Math.ceil(g / G_PAR_LB)), consigne: `tout dans une seule boîte (au lieu de ${avant})` }];
+      notes.push(`une seule boîte : ${choix.nom} au lieu de ${avant}` + (vol(choix) < besoin ? " (le plus grand carton permis : serrer)" : ""));
+    } else notes.push(`aucun carton assez grand pour tout mettre dans une seule boîte : ${colis.length} colis`);
   }
   if (colis.length > 1) notes.push(`envoi en ${colis.length} colis : ${colis.map(c => c.boite).join(" + ")}`);
   const boite = colis.length === 1 ? { nom: colis[0].boite, nom_shopify: colis[0].boite, longueur_po: colis[0].longueur_po, largeur_po: colis[0].largeur_po, hauteur_po: colis[0].hauteur_po }
