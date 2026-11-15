@@ -430,8 +430,8 @@ function planCommande(c, regle) {
   const nbFin = contenu.boite_financement;
   const seule = !estB2B && !nbFin && equiv > 0 && !tours && !nbCannes && !nbCannesD ? choisirBoite(regle, pieces) : null;
   let colis = [], format = null;
-  // La tour de Noël (Alexandre, 12 nov. 2026) : 1 tour = 20x10x6, 3,4 kg, jusqu'à 16 pinces de plus (poids ajouté) ;
-  // 1 tour + plus de 16 pinces = 20x14x8, 4 kg ; 2 tours (avec leurs 2 plateaux) = 16x16x16 (tours_noel.deux), 6,8 kg. Au-delà : des boîtes de 2 tours, puis une boîte d'une tour.
+  // La tour de Noël (Alexandre, 12 nov. 2026) : 1 tour seule = 20x10x6, 3,4 kg (tours_noel.une) ; 1 tour avec d'autres pinces = 14x14x14
+  // (tours_noel.une_plus, Alexandre, 15 nov. 2026), 3,55 kg + le poids des pinces ; 2 tours (avec leurs 2 plateaux) = 16x16x16 (tours_noel.deux), 6,8 kg. Au-delà : des boîtes de 2 tours, puis une boîte d'une tour.
   // Les pinces qui ne vont pas avec une tour (2 tours, ou trop de pinces, ou un présentoir de comptoir) partent dans leur carton habituel.
   let pincesAvecTour = false;
   if (tours > 0) {
@@ -446,7 +446,7 @@ function planCommande(c, regle) {
       if (tours % 2) {
         const peut = !nbFin && !presentoirs;
         if (peut && place <= tn.une.pinces_max) { colis.push(boiteTour(tn.une, Math.round(tn.une.kg * 1000 + gPinces), 1, tn.une.consigne + (place ? ` (${ajout})` : ""))); pincesAvecTour = place > 0; }
-        else if (peut && place <= tn.une_plus.pinces_max) { colis.push(boiteTour(tn.une_plus, Math.max(Math.round(tn.une_plus.kg * 1000), Math.round(tn.une.kg * 1000 + gPinces)), 1, tn.une_plus.consigne + ` (${ajout})`)); pincesAvecTour = true; if (tn.une_plus.a_confirmer) notes.push("tour de Noël : " + tn.une_plus.a_confirmer); }
+        else if (peut && place <= tn.une_plus.pinces_max) { colis.push(boiteTour(tn.une_plus, Math.round(tn.une_plus.kg * 1000 + gPinces), 1, tn.une_plus.consigne + ` (${ajout})`)); pincesAvecTour = true; if (tn.une_plus.a_confirmer) notes.push("tour de Noël : " + tn.une_plus.a_confirmer); }
         else colis.push(boiteTour(tn.une, Math.round(tn.une.kg * 1000), 1, tn.une.consigne));
       }
       notes.push(`tour de Noël (${tours} tour${tours > 1 ? "s" : ""}) : ` + colis.map(c => `${c.boite} pour ${c.tours} tour${c.tours > 1 ? "s" : ""} — ${c.consigne}`).join(" + "));
