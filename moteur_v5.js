@@ -204,6 +204,15 @@ function validerRegle(r) {
     for (const k of ["une", "une_plus"]) if (tn[k] && !(Number.isInteger(tn[k].pinces_max) && tn[k].pinces_max >= 0)) err.push(`tours_noel.${k}.pinces_max doit être un entier ≥ 0`);
     if (tn.une && tn.une_plus && !(tn.une_plus.pinces_max > tn.une.pinces_max)) err.push("tours_noel : une_plus.pinces_max doit dépasser une.pinces_max");
   }
+  const cd = r.cannes_detail;   // cannes au détail, « Pince mystère en canne » (14 nov. 2026)
+  if (cd != null) {
+    for (const k of ["P", "M", "G"]) if (!(cd.poids_g && pos(cd.poids_g[k]))) err.push(`cannes_detail.poids_g.${k} doit être un nombre positif`);
+    if (!(Number.isInteger(cd.pinces_par_canne) && cd.pinces_par_canne > 0)) err.push("cannes_detail.pinces_par_canne doit être un entier positif");
+    if (!(Number.isInteger(cd.pinces_libres) && cd.pinces_libres >= 0)) err.push("cannes_detail.pinces_libres doit être un entier positif ou nul");
+    const bs = cd.boites || [];
+    if (!bs.length) err.push("cannes_detail.boites manquant");
+    bs.forEach((b, i) => { if (!(Number.isInteger(b.cannes) && b.cannes > 0) || !cartons.has(b.carton)) err.push(`cannes_detail.boites[${i}] : nombre de cannes ou carton invalide`); else if (i && !(b.cannes > bs[i - 1].cannes)) err.push("cannes_detail.boites : les nombres de cannes doivent monter"); });
+  }
   const cn = r.cannes_noel;   // cannes de Noël revendeur (12 nov. 2026)
   if (cn != null) {
     for (const k of ["P", "M", "G"]) if (!(cn.poids_g && pos(cn.poids_g[k]))) err.push(`cannes_noel.poids_g.${k} doit être un nombre positif`);
@@ -292,6 +301,15 @@ function classerLigne(ligne, regle) {
     const s = (String(ligne.sku || "").match(/-([PMG])$/i) || [])[1];
     const t = tailleDepuis(ligne, regle) || tailleMot(ligne.variantTitle) || (s ? s.toUpperCase() : null);
     return { b2b: true, titre: ligne.title, qte, type: "canne", cannes: { [t || "G"]: qte }, inconnu: !t };
+  }
+  // « Pince surprise offerte » (BONUS-SURPRISE, 0 $) : une pince cadeau choisie par l'équipe, comptée comme une moyenne (pas « grandeur à vérifier »)
+  if (/^pince surprise offerte\b/.test(titre) || /^BONUS-SURPRISE$/i.test(String(ligne.sku || ""))) return { type: "pinces", pinces: { M: qte }, titre: ligne.title };
+  // « Pince mystère en canne — Noël 2026 » (détail, 14 nov. 2026) : une canne = une pince de la grandeur de la variante,
+  // dans sa boîte à cannes (cannes_detail) ; une commande B2B qui en contient suit les cannes revendeur (cannes_noel).
+  if (/^pince mystere en canne\b/.test(titre) || /^CAN-MYS-/i.test(String(ligne.sku || ""))) {
+    const s = (String(ligne.sku || "").match(/-([PMG])$/i) || [])[1];
+    const t = tailleDepuis(ligne, regle) || tailleMot(ligne.variantTitle) || (s ? s.toUpperCase() : null);
+    return { titre: ligne.title, qte, type: "canne_detail", cannes: { [t || "G"]: qte }, inconnu: !t };
   }
   // « Kit 3 grandeurs — 24 pinces revendeur » (B2B) : autant de petites, de moyennes et de grandes (8 + 8 + 8)
   if (/^kit 3 grandeurs\b/.test(titre)) { const n = Number((titre.match(/(\d+)\s*pinces/) || [])[1] || 24), k = Math.round(n / 3) * qte; return { b2b: true, titre: ligne.title, qte, type: "pinces", pinces: { P: k, M: k, G: k }, note: `kit 3 grandeurs : ${k} petites, ${k} moyennes, ${k} grandes` }; }
@@ -394,16 +412,21 @@ function planCommande(c, regle) {
   // Cannes de Noël revendeur (12 nov. 2026) : poids réel de chaque canne (cannes_noel.poids_g) ; pour choisir le carton,
   // une canne prend la place de cannes_noel.place_pinces pinces (« place » = pinces + place des cannes).
   const cn = regle.cannes_noel, cannes = { P: 0, M: 0, G: 0 };
-  for (const x of classes) if (x.type === "canne") for (const [t, n] of Object.entries(x.cannes)) cannes[t] += n;
+  for (const x of classes) if (x.type === "canne" || (estB2B && x.type === "canne_detail")) for (const [t, n] of Object.entries(x.cannes)) cannes[t] += n;
+  // Cannes au détail (14 nov. 2026) : une boîte selon le nombre de cannes (cannes_detail.boites, Alexandre) ; les pinces ordinaires de la
+  // commande : les pinces_libres premières entrent sans changer la boîte, puis pinces_par_canne pinces prennent la place d'une canne.
+  const cd = regle.cannes_detail, cannesD = { P: 0, M: 0, G: 0 };
+  if (!estB2B) for (const x of classes) if (x.type === "canne_detail") for (const [t, n] of Object.entries(x.cannes)) cannesD[t] += n;
+  const nbCannesD = cannesD.P + cannesD.M + cannesD.G;
   const nbCannes = cannes.P + cannes.M + cannes.G;
   if (nbCannes && !cn) raisons.push(R("AUCUNE_BOITE", "cannes de Noël : règle des boîtes sans cannes_noel, à traiter à la main"));
   const gCannes = cn ? ["P", "M", "G"].reduce((s, k) => s + cannes[k] * cn.poids_g[k], 0) : 0;
   const placeCannes = cn ? Math.ceil(nbCannes * cn.place_pinces) : 0;
   const place = equiv + placeCannes;
   if (nbCannes && cn) notes.push(`cannes de Noël : ${nbCannes} (P ${cannes.P} · M ${cannes.M} · G ${cannes.G}), ${Math.round(gCannes)} g, place de ${placeCannes} pinces dans le carton` + (cn.a_confirmer ? ` (${cn.a_confirmer})` : ""));
-  if (!equiv && !presentoirs && !tours && !nbCannes && !inconnus.length && !kitsInconnus.length) raisons.push(R("AUCUNE_PINCE", "aucune pince ni présentoir à expédier : à vérifier à la main"));
+  if (!equiv && !presentoirs && !tours && !nbCannes && !nbCannesD && !inconnus.length && !kitsInconnus.length) raisons.push(R("AUCUNE_PINCE", "aucune pince ni présentoir à expédier : à vérifier à la main"));
   const nbFin = contenu.boite_financement;
-  const seule = !estB2B && !nbFin && equiv > 0 && !tours && !nbCannes ? choisirBoite(regle, pieces) : null;
+  const seule = !estB2B && !nbFin && equiv > 0 && !tours && !nbCannes && !nbCannesD ? choisirBoite(regle, pieces) : null;
   let colis = [], format = null;
   // La tour de Noël (Alexandre, 12 nov. 2026) : 1 tour = 20x10x6, 3,4 kg, jusqu'à 16 pinces de plus (poids ajouté) ;
   // 1 tour + plus de 16 pinces = 20x14x8, 4 kg ; 2 tours (avec leurs 2 plateaux) = 16x16x16 (tours_noel.deux), 6,8 kg. Au-delà : des boîtes de 2 tours, puis une boîte d'une tour.
@@ -430,7 +453,22 @@ function planCommande(c, regle) {
   }
   // Boîtes de financement : empilées dans les cartons de financement, aussi pour un organisme B2B qui n'achète que des boîtes
   // (ex. école, 48 boîtes) ; une commande B2B avec des pinces de distribution suit les gros formats.
-  if (nbFin > 0 && (!estB2B || !classes.some(x => x.b2b))) {
+  if (nbCannesD && (nbFin > 0 || !cd)) {
+    raisons.push(R("AUCUNE_BOITE", nbFin > 0 ? "cannes et boîtes de financement dans la même commande : boîte à choisir à la main" : "cannes : règle des boîtes sans cannes_detail, à traiter à la main"));
+  } else if (nbCannesD) {
+    const place = nbCannesD + Math.ceil(Math.max(0, equiv - cd.pinces_libres) / cd.pinces_par_canne);
+    const bs = cd.boites, max = bs[bs.length - 1].cannes, carton = (nom) => (regle.cartons || []).find(c => c.nom === nom);
+    const parts = []; let reste = place;
+    while (reste > max) { parts.push(max); reste -= max; }
+    parts.push(reste);
+    const gTout = ["P", "M", "G"].reduce((s, k) => s + cannesD[k] * cd.poids_g[k] + pieces[k] * regle.poids_g[k], 0);
+    if (parts.length > LIMITES.COLIS_MAX) raisons.push(R("AUCUNE_BOITE", `${nbCannesD} cannes : plus de ${LIMITES.COLIS_MAX} boîtes, à traiter à la main`));
+    else {
+      colis = parts.map((n) => { const b = carton(bs.find((x) => x.cannes >= n).carton); const g = Math.round(gTout * n / place) + (b.poids_vide_g || 0);
+        return { boite: b.nom, longueur_po: b.longueur_po, largeur_po: b.largeur_po, hauteur_po: b.hauteur_po, cannes: n, pieces: null, poids_g: g, poids_lb: Math.max(1, Math.ceil(g / G_PAR_LB)) }; });
+      notes.push(`cannes : ${nbCannesD} (P ${cannesD.P} · M ${cannesD.M} · G ${cannesD.G})` + (equiv ? ` + ${equiv} pince${equiv > 1 ? "s" : ""}` : "") + ` = place de ${place} canne${place > 1 ? "s" : ""} : ` + colis.map((c) => c.boite).join(" + ") + (cd.a_confirmer ? ` (${cd.a_confirmer})` : ""));
+    }
+  } else if (nbFin > 0 && (!estB2B || !classes.some(x => x.b2b))) {
     const f = financementColis(regle, nbFin, finPieces, vrac);
     if (!f) raisons.push(R("AUCUNE_BOITE", `boîtes de financement : aucun carton prévu pour ce nombre, à traiter à la main`));
     else { colis = f.colis; notes.push(f.note); }
@@ -465,7 +503,7 @@ function planCommande(c, regle) {
   return {
     no, id: c.id, cree_le: c.createdAt, segment: estB2B ? "B2B" : "B2C", b2b: !!estB2B, presentoirs, express, tours,
     statut: raisons.length ? "SIGNALER" : "A_COMPARER", raisons, notes,
-    destination: dest, contenu, pieces, nb_pinces: equiv, cannes: nbCannes ? cannes : null, nb_cannes: nbCannes,
+    destination: dest, contenu, pieces, nb_pinces: equiv, cannes: nbCannes ? cannes : null, nb_cannes: nbCannes, cannes_detail: nbCannesD ? cannesD : null, nb_cannes_detail: nbCannesD,
     boite: boite ? { nom: boite.nom, nom_shopify: boite.nom_shopify || boite.nom, longueur_po: boite.longueur_po, largeur_po: boite.largeur_po, hauteur_po: boite.hauteur_po } : null,
     poids_g: poidsTotalG, poids_lb: lb, poids_kg: Math.round(lb * G_PAR_LB / 10) / 100,
     origine_cp: cpNorm(regle.origine.code_postal),
