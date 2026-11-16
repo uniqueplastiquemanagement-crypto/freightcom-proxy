@@ -355,7 +355,7 @@ function adresseSuspecte(a) {
 }
 
 // ---------- Plan par commande ----------
-const CODES_SANS_SOUMISSION = new Set(["MALLET", "STATUT_EXPEDITION", "DEJA_ETIQUETEE", "ADRESSE", "HORS_CANADA", "CODE_POSTAL", "CUEILLETTE", "ADRESSE_SUSPECTE", "AUCUNE_BOITE", "LIGNES_TRONQUEES", "ARTICLE_INCONNU", "KIT_NON_RECONNU", "AUCUNE_PINCE"]);
+const CODES_SANS_SOUMISSION = new Set(["MALLET", "CAMPAGNE", "STATUT_EXPEDITION", "DEJA_ETIQUETEE", "ADRESSE", "HORS_CANADA", "CODE_POSTAL", "CUEILLETTE", "ADRESSE_SUSPECTE", "AUCUNE_BOITE", "LIGNES_TRONQUEES", "ARTICLE_INCONNU", "KIT_NON_RECONNU", "AUCUNE_PINCE"]);
 
 function planCommande(c, regle) {
   const raisons = [], notes = [];
@@ -372,6 +372,9 @@ function planCommande(c, regle) {
 
   const mallet = (c.discountCodes || []).map(String).find(k => /mallet/i.test(k));
   if (mallet) raisons.push(R("MALLET", `NE PAS EXPÉDIER : code ${mallet} (campagne Marcelle-Mallet)`));
+  // Campagne École polyvalente St-Jérôme (Alexandre, 15 nov. 2026) : les boîtes partent avec la livraison de l'école, jamais par la poste.
+  const campagne = (c.discountCodes || []).map(String).find(k => /^stjerome-/i.test(k));
+  if (campagne) raisons.push(R("CAMPAGNE", `NE PAS EXPÉDIER : code ${campagne} (campagne École polyvalente St-Jérôme, livrée avec les boîtes de l'école)`));
   if (c.displayFinancialStatus !== "PAID") {
     if (estB2B) notes.push(`B2B : paiement ${String(c.displayFinancialStatus || "inconnu").toLowerCase()} (modalités de paiement)`);
     else raisons.push(R("PAIEMENT", `paiement ${String(c.displayFinancialStatus || "inconnu").toLowerCase()}`));
