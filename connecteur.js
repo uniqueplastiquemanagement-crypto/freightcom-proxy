@@ -36,7 +36,7 @@ const { M, erreurMoteur, SHOP, appShopify, shopify, REQ_COMMANDES, cpNorm, maint
 let PDFDocument = null;
 try { ({ PDFDocument } = require("pdf-lib")); } catch { /* signalé par l'outil etat */ }
 
-const VERSION = "1.4.13";
+const VERSION = "1.4.14";
 const PORT = process.env.PORT || 10000;
 const PROXY_KEY = process.env.PROXY_KEY || "";
 const ENV = (process.env.FREIGHTCOM_ENV || "test").toLowerCase();
@@ -213,7 +213,7 @@ function messageAchat(r, a) {
   return `Freightcom a refusé l'achat (HTTP ${r ? r.status : "?"})` + (champs.length ? ` ; champs en cause : ${champs.join(", ")}` : "");
 }
 
-// ---------- Réponses des employés (comme avecReponses dans le Poste) : grandeurs et compositions de kits ----------
+// ---------- Réponses des employés (comme avecReponses dans le Poste) : grandeurs, compositions de kits et boîte choisie ----------
 function validerAjustements(aj, nos) {
   if (aj == null) return {};
   if (typeof aj !== "object" || Array.isArray(aj)) throw new Error("ajustements illisibles");
@@ -224,6 +224,8 @@ function validerAjustements(aj, nos) {
     const te = Object.entries(v.tailles || {}), ce = Object.entries(v.compositions || {});
     if (te.length > 30 || ce.length > 30) throw new Error(`ajustements #${no} : trop d'entrées`);
     const t = {}, c = {};
+    // Boîte choisie dans le Poste (17 nov. 2026) : un nom de boîte de la règle, ex. « 16x12x8 » (vérifié contre la règle au moment du plan).
+    if (v.carton != null && !(typeof v.carton === "string" && /^\d{1,2}x\d{1,2}x\d{1,2}$/.test(v.carton))) throw new Error(`ajustements #${no} : boîte invalide`);
     for (const [k, x] of te) { if (!k.trim() || k.length > 120 || !["P", "M", "G"].includes(x)) throw new Error(`ajustements #${no} : grandeur invalide`); t[k] = x; }
     for (const [k, x] of ce) {
       if (!k.trim() || k.length > 200 || !x || typeof x !== "object" || Array.isArray(x)) throw new Error(`ajustements #${no} : composition invalide`);
@@ -231,7 +233,7 @@ function validerAjustements(aj, nos) {
       for (const g of ["P", "M", "G"]) { const n = x[g] == null || x[g] === "" ? 0 : Number(x[g]); if (!Number.isInteger(n) || n < 0 || n > 500) throw new Error(`ajustements #${no} : composition invalide`); if (n) y[g] = n; }
       c[k] = y;
     }
-    if (te.length || ce.length) out[no] = { tailles: t, compositions: c };
+    if (te.length || ce.length || v.carton) out[no] = Object.assign({ tailles: t, compositions: c }, v.carton ? { carton: v.carton } : {});
   }
   return out;
 }
@@ -297,6 +299,10 @@ async function traiterLot(l, regle) {
           if (b2b && p.segment !== "B2B") p = Object.assign({}, p, { segment: "B2B", b2b: true });
         }
         catch (e) { l.resultats[no] = rien("réponses des employés refusées : " + String(e.message || e).slice(0, 120)); continue; }
+        if (l.ajustements[no].carton) {
+          try { p = M.choisirCarton(p, rUn, l.ajustements[no].carton); }
+          catch (e) { l.resultats[no] = rien("boîte choisie refusée : " + String(e.message || e).slice(0, 120)); continue; }
+        }
       }
       const planUn = { version_regle: rUn.version, achats_permis: rUn.achats_permis === true, commandes: [p] };
       const textes = (rs) => rs.map((r) => r.texte).join(" ; ");
@@ -366,7 +372,8 @@ async function traiterLot(l, regle) {
       if (!retenu.service_id) { l.resultats[no] = rien("aucun tarif Freightcom admissible", { comparaison }); continue; }
       const choisi = tarifs.find((t) => t.service_id === retenu.service_id) || {};
       const ttc = Number(choisi.total_taxes_incluses);
-      const base = { transporteur: retenu.transporteur, service: retenu.service, montant_ttc: Number.isFinite(ttc) ? ttc : null, montant_ht: retenu.montant, comparaison };
+      const base = { transporteur: retenu.transporteur, service: retenu.service, montant_ttc: Number.isFinite(ttc) ? ttc : null, montant_ht: retenu.montant, comparaison,
+        boite: p.boite ? p.boite.nom : null, poids_lb: p.poids_lb, boite_choisie: !!p.boite_choisie };
       if (!(ttc > 0) || ttc > GARDE_TECHNIQUE) { l.resultats[no] = rien(`prix anormal (${Number.isFinite(ttc) ? ttc.toFixed(2) : "?"} $ taxes incluses ; garde-fou technique de ${GARDE_TECHNIQUE} $) : à vérifier`, base); continue; }
 
       // Achat (une étiquette par commande ; la passerelle refuse un 2e achat, un service qu'elle n'a pas vu et un prix anormal)
@@ -460,7 +467,7 @@ const OUTILS = [
       lot_id: { type: "string", pattern: "^L\\d{8}-\\d{6}-[a-z0-9]{4}$", description: "identifiant du lot écrit par le Poste" },
       commandes: { type: "array", minItems: 1, maxItems: MAX_LOT, items: { type: "string", pattern: "^\\d{3,7}$" }, description: "numéros de commande Shopify, sans #, dans l'ordre d'impression" },
       regle: { type: "object", description: "règle des boîtes du Poste (Drive), validée par le moteur" },
-      ajustements: { type: "object", description: "réponses des employés par numéro de commande : {tailles: {titre: P|M|G}, compositions: {titre: {P, M, G}}}, comme dans le Poste" },
+      ajustements: { type: "object", description: "réponses des employés par numéro de commande : {tailles: {titre: P|M|G}, compositions: {titre: {P, M, G}}, carton: nom d'une boîte de la règle (ex. « 16x12x8 ») choisie par l'équipe à la place de la boîte suggérée}, comme dans le Poste" },
       nom_fichier: { type: "string", minLength: 5, maxLength: 120, description: "nom du PDF du lot pour le PC de l'usine, ex. « 27oct.11h59-MIMI-CLAUDE-étiquettesd'expédition.pdf » (date et heure - qui emballe - CLAUDE - ce que c'est)" } } } },
   { name: "tarifs_shopify", description: "Statut des prix Shopify lus dans le calculateur (contre-vérifiés ou non) pour des commandes du Poste, avec le moins cher permis. Lecture seulement, sans adresse.",
     annotations: { title: "Prix Shopify contre-vérifiés", readOnlyHint: true, openWorldHint: false },

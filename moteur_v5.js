@@ -547,6 +547,30 @@ function planCommande(c, regle) {
   };
 }
 
+// Boîte choisie par l'équipe (Alexandre, 17 nov. 2026 : « c'est le fun que tu me suggères des grandeurs, mais j'aimerais pouvoir choisir si
+// jamais la grande ne convient pas ») : les colis prévus sont remplacés par un seul colis dans la boîte choisie. Poids = contenu des colis
+// prévus (moins leurs cartons vides) + le carton choisi, comme pour « une seule boîte ». Boîte inconnue de la règle → erreur.
+function choisirCarton(p, regle, nom) {
+  if (!p || !nom) return p;
+  const toutes = [...(regle.cartons || []), ...(regle.boites || [])];
+  const b = toutes.find((x) => x.nom === nom);
+  if (!b) throw new Error(`boîte inconnue de la règle : ${String(nom).slice(0, 30)}`);
+  if (!p.colis || !p.colis.length) return p;   // rien à remplacer (commande à la main)
+  const avant = p.colis.map((x) => x.boite).join(" + ");
+  if (avant === b.nom) return p;
+  const vide = (n) => { const x = toutes.find((y) => y.nom === n); return x ? (x.poids_vide_g || 0) : 0; };
+  const g = Math.max(1, p.colis.reduce((s, x) => s + (x.poids_g || 0) - vide(x.boite), 0) + (b.poids_vide_g || 0));
+  const lb = Math.max(1, Math.ceil(g / G_PAR_LB));
+  const boite = { nom: b.nom, nom_shopify: b.nom_shopify || b.nom, longueur_po: b.longueur_po, largeur_po: b.largeur_po, hauteur_po: b.hauteur_po };
+  return Object.assign({}, p, {
+    colis: [{ boite: b.nom, longueur_po: b.longueur_po, largeur_po: b.largeur_po, hauteur_po: b.hauteur_po, pieces: null, poids_g: g, poids_lb: lb, consigne: `boîte choisie par l'équipe (au lieu de ${avant})` }],
+    boite, poids_g: g, poids_lb: lb, poids_kg: Math.round(lb * G_PAR_LB / 10) / 100,
+    boite_suggeree: avant, boite_choisie: b.nom,
+    notes: [...(p.notes || []), `boîte choisie par l'équipe : ${b.nom} au lieu de ${avant}`],
+    cle: p.destination ? cle(regle.origine.code_postal, p.destination, boite, lb) : p.cle,
+  });
+}
+
 function plan(commandes, regle) {
   validerRegle(regle);
   const vus = new Set(), liste = [];
@@ -703,7 +727,7 @@ function resume(t) {
   return t ? { plateforme: t.plateforme, transporteur: t.transporteur_canonique, service: String(t.service || t.transporteur).slice(0, 60), montant: t.montant, delai: t.delai || null, releve_le: t.releve_le, service_id: t.service_id || null, ref: t.ref || null } : null;
 }
 
-module.exports = { rentre, choisirBoite, repartir, grosFormat, LIMITES, prix, norm, cle, transporteurCanonique, classerLigne, planCommande, plan, extraireShopify, demandeFreightcom, extraireFreightcom, decision, validerRegle, G_PAR_LB };
+module.exports = { rentre, choisirBoite, repartir, grosFormat, LIMITES, prix, norm, cle, transporteurCanonique, classerLigne, planCommande, choisirCarton, plan, extraireShopify, demandeFreightcom, extraireFreightcom, decision, validerRegle, G_PAR_LB };
 
 if (require.main === module) {
   const [cmd, ...args] = process.argv.slice(2);
