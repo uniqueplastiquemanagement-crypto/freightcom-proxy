@@ -191,6 +191,7 @@ function validerRegle(r) {
   if (!r.origine || !/^[A-Z]\d[A-Z]\d[A-Z]\d$/.test(cpNorm(r.origine.code_postal))) err.push("origine.code_postal invalide");
   const cartons = new Map((r.cartons || []).map(c => [c.nom, c]));
   for (const c of r.cartons || []) for (const k of ["longueur_po", "largeur_po", "hauteur_po"]) if (!(Number.isInteger(c[k]) && c[k] > 0)) err.push(`carton ${c.nom} : ${k} doit être un entier positif`);
+  for (const c of r.cartons || []) if (c.manuel != null && typeof c.manuel !== "boolean") err.push(`carton ${c.nom} : manuel doit être true ou false`);
   if (!Array.isArray(r.gros_formats) || !r.gros_formats.length) err.push("gros_formats manquant (feuille des cartons)");
   for (const f of r.financement_empilage || []) if (!(Number.isInteger(f.max_boites) && f.max_boites > 1) || !cartons.has(f.carton)) err.push(`financement_empilage ${f.max_boites} : palier ou carton invalide`);
   for (const g of r.gros_formats || []) {
@@ -510,7 +511,8 @@ function planCommande(c, regle) {
     const vol = (x) => x.longueur_po * x.largeur_po * x.hauteur_po;
     const vide = (nom) => { const b = [...(regle.cartons || []), ...(regle.boites || [])].find((x) => x.nom === nom); return b ? (b.poids_vide_g || 0) : 0; };
     const besoin = colis.reduce((s, x) => s + vol(x), 0);
-    const permis = (regle.cartons || []).filter((x) => !tours || (usb.cartons_tours || []).includes(x.nom)).sort((x, y) => vol(x) - vol(y));
+    // « manuel » : boîte offerte seulement dans la liste déroulante du Poste, jamais choisie toute seule (8x8x10, 17 nov. 2026)
+    const permis = (regle.cartons || []).filter((x) => !x.manuel && (!tours || (usb.cartons_tours || []).includes(x.nom))).sort((x, y) => vol(x) - vol(y));
     const choix = permis.find((x) => vol(x) >= besoin) || (tours ? permis[permis.length - 1] : null);
     if (choix) {
       const avant = colis.map((x) => x.boite).join(" + ");
