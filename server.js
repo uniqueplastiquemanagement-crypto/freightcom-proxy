@@ -16,6 +16,7 @@ const http = require("http");
 const crypto = require("crypto");
 const base = require("./base");
 const connecteur = require("./connecteur");
+const espace = require("./espace");
 const magasinage = require("./magasinage");
 
 const TOKEN      = process.env.UPSTREAM_TOKEN;
@@ -97,6 +98,8 @@ async function verifierAdresse(corps) {
 
 // Surface autorisée. Tout le reste est refusé (factures, manifestes, suppressions, LTL).
 const ALLOW = [
+  { m: ["POST"], re: /^\/espace\/shopify$/, espace: "shopify" },    // ESPACE : une opération Shopify du Poste (liste fermée, espace.js)
+  { m: ["GET"],  re: /^\/espace\/regle-boites$/, espace: "regle" },  // ESPACE : la règle des boîtes du dépôt
   { m: ["POST"], re: /^\/adresse$/, adresse: true },                 // VÉRIFIER une adresse (geocoder.ca, voir plus haut)
   { m: ["POST"], re: /^\/magasinage\/(demande|lecture|echec|signal)$/, magasinage: true }, // magasinage Shopify (magasinage.js)
   { m: ["GET"],  re: /^\/magasinage\/(etat|programme)$/, magasinage: true },
@@ -385,6 +388,20 @@ async function traiterRequete(req, res) {
       if (e instanceof magasinage.Refus) return send(e.statut, { error: e.message, code: e.code });
       console.log(`${new Date().toISOString()} MAGASINAGE ${quoi} -> erreur ${String((e && e.name) || "inconnue").slice(0, 40)}`); // jamais le message (il peut citer le texte lu)
       return send(502, { error: "magasinage : " + String((e && e.message) || e).slice(0, 160) });
+    }
+  }
+
+  if (regle.espace) {
+    try {
+      if (regle.espace === "regle") return send(200, espace.regleBoites());
+      let corps; try { corps = JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}"); } catch { return send(400, { error: "corps JSON illisible" }); }
+      const r = await espace.shopify(corps);
+      // Journal : l'opération seulement (jamais les variables : elles peuvent contenir une adresse).
+      console.log(`${new Date().toISOString()} POST /espace/shopify ${r.op}${r.ecriture ? " ECRITURE" : ""} -> ${r.reponse.errors ? "erreurs GraphQL" : "ok"}`);
+      return send(200, r.reponse);
+    } catch (e) {
+      if (e instanceof espace.Refus) return send(e.statut, { error: e.message });
+      return send(502, { error: "espace : " + String((e && e.message) || e).slice(0, 160) });
     }
   }
 

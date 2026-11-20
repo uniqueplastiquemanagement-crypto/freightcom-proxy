@@ -1,0 +1,42 @@
+{
+  "commandes_ouvertes": {
+    "query": "query($q: String!, $after: String) { orders(first: 50, after: $after, query: $q, sortKey: CREATED_AT) { pageInfo { hasNextPage endCursor } nodes { id name createdAt test cancelledAt tags note displayFinancialStatus displayFulfillmentStatus discountCodes purchasingEntity { __typename } shippingAddress { name company address1 address2 city provinceCode zip countryCodeV2 validationResultSummary } shippingLines(first: 2) { nodes { title } } fulfillments(first: 5) { status createdAt } lineItems(first: 50) { nodes { title variantTitle quantity currentQuantity unfulfilledQuantity requiresShipping lineItemGroup { title quantity } variant { selectedOptions { name value } } } } } } }",
+    "ecriture": false
+  },
+  "commandes_recentes": {
+    "query": "query($q: String!, $after: String) { orders(first: 50, after: $after, query: $q, sortKey: UPDATED_AT, reverse: true) { pageInfo { hasNextPage endCursor } nodes { id name createdAt test cancelledAt tags note displayFinancialStatus displayFulfillmentStatus discountCodes purchasingEntity { __typename } shippingAddress { name company address1 address2 city provinceCode zip countryCodeV2 validationResultSummary } shippingLines(first: 2) { nodes { title } } fulfillments(first: 5) { status createdAt } lineItems(first: 50) { nodes { title variantTitle quantity currentQuantity unfulfilledQuantity requiresShipping lineItemGroup { title quantity } variant { selectedOptions { name value } } } } } } }",
+    "ecriture": false
+  },
+  "commandes_traitees": {
+    "query": "query($q: String!, $after: String) { orders(first: 10, after: $after, query: $q, sortKey: CREATED_AT) { pageInfo { hasNextPage endCursor } nodes { id name createdAt test cancelledAt tags note displayFinancialStatus displayFulfillmentStatus discountCodes purchasingEntity { __typename } shippingAddress { name company address1 address2 city provinceCode zip countryCodeV2 validationResultSummary } shippingLines(first: 2) { nodes { title } } fulfillments(first: 5) { id status createdAt fulfillmentLineItems(first: 50) { nodes { quantity lineItem { id } } } } lineItems(first: 50) { nodes { id title variantTitle quantity currentQuantity unfulfilledQuantity requiresShipping lineItemGroup { title quantity } variant { selectedOptions { name value } } } } } } }",
+    "ecriture": false
+  },
+  "commande_a_traiter": {
+    "query": "query($id: ID!) { order(id: $id) { name displayFulfillmentStatus fulfillmentOrders(first: 10) { nodes { id status supportedActions { action } lineItems(first: 50) { nodes { id remainingQuantity } } } } } }",
+    "ecriture": false
+  },
+  "traiter_commande": {
+    "query": "mutation($f: FulfillmentInput!) { fulfillmentCreate(fulfillment: $f) { fulfillment { id status trackingInfo { company number url } } userErrors { field message } } }",
+    "ecriture": true
+  },
+  "adresse_commande": {
+    "query": "query($id: ID!) { order(id: $id) { note displayFulfillmentStatus shippingAddress { firstName lastName company address1 address2 city provinceCode zip countryCodeV2 phone } } }",
+    "ecriture": false
+  },
+  "corriger_commande": {
+    "query": "mutation($input: OrderInput!) { orderUpdate(input: $input) { order { id note } userErrors { field message } } }",
+    "ecriture": true
+  },
+  "noms_commandes": {
+    "query": "query($q: String!) { orders(first: 50, query: $q) { nodes { name displayFulfillmentStatus shippingAddress { name city provinceCode } } } }",
+    "ecriture": false
+  },
+  "noms_dictee": {
+    "query": "query($q: String!) { orders(first: 50, query: $q) { nodes { name purchasingEntity { __typename } shippingAddress { name company city } } } }",
+    "ecriture": false
+  },
+  "id_commande": {
+    "query": "query($q: String!) { orders(first: 3, query: $q) { nodes { id name } } }",
+    "ecriture": false
+  }
+}
