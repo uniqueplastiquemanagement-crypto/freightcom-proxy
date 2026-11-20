@@ -204,6 +204,13 @@ function validerRegle(r) {
     for (const k of ["une", "une_plus", "deux"]) { const v = tn[k]; if (!v || !cartons.has(v.carton)) err.push(`tours_noel.${k} : carton inconnu`); else if (!pos(v.kg)) err.push(`tours_noel.${k} : poids kg manquant`); }
     for (const k of ["une", "une_plus"]) if (tn[k] && !(Number.isInteger(tn[k].pinces_max) && tn[k].pinces_max >= 0)) err.push(`tours_noel.${k}.pinces_max doit être un entier ≥ 0`);
     if (tn.une && tn.une_plus && !(tn.une_plus.pinces_max > tn.une.pinces_max)) err.push("tours_noel : une_plus.pinces_max doit dépasser une.pinces_max");
+    // paliers_plus : une tour + d'autres pinces, carton selon le nombre de pinces (Alexandre, 19 nov. 2026 : 25 à 50 pinces → 20x14x10)
+    if (tn.paliers_plus != null && !Array.isArray(tn.paliers_plus)) err.push("tours_noel.paliers_plus doit être une liste");
+    for (const p of Array.isArray(tn.paliers_plus) ? tn.paliers_plus : []) {
+      if (!p || !cartons.has(p.carton)) err.push(`tours_noel.paliers_plus : carton inconnu (${p && p.carton})`);
+      else if (!pos(p.kg)) err.push(`tours_noel.paliers_plus ${p.carton} : poids kg manquant`);
+      if (!(p && Number.isInteger(p.pinces_min) && Number.isInteger(p.pinces_max) && p.pinces_min >= 1 && p.pinces_max >= p.pinces_min)) err.push(`tours_noel.paliers_plus ${p && p.carton} : pinces_min et pinces_max doivent être des entiers, 1 ≤ min ≤ max`);
+    }
   }
   const cd = r.cannes_detail;   // cannes au détail, « Pince mystère en canne » (14 nov. 2026)
   if (cd != null) {
@@ -454,7 +461,10 @@ function planCommande(c, regle) {
       for (let i = 0; i < Math.floor(tours / 2); i++) colis.push(boiteTour(tn.deux, Math.round(tn.deux.kg * 1000), 2, tn.deux.consigne));
       if (tours % 2) {
         const peut = !nbFin && !presentoirs;
+        // un palier de tours_noel.paliers_plus d'abord (19 nov. 2026 : 1 tour + 25 à 50 pinces → 20x14x10), sinon une_plus (14x14x14)
+        const pal = peut && place > tn.une.pinces_max ? (tn.paliers_plus || []).find((p) => place >= p.pinces_min && place <= p.pinces_max && carton(p)) : null;
         if (peut && place <= tn.une.pinces_max) { colis.push(boiteTour(tn.une, Math.round(tn.une.kg * 1000 + gPinces), 1, tn.une.consigne + (place ? ` (${ajout})` : ""))); pincesAvecTour = place > 0; }
+        else if (pal) { colis.push(boiteTour(pal, Math.round(pal.kg * 1000 + gPinces), 1, pal.consigne + ` (${ajout})`)); pincesAvecTour = true; if (pal.a_confirmer) notes.push("tour de Noël : " + pal.a_confirmer); }
         else if (peut && place <= tn.une_plus.pinces_max) { colis.push(boiteTour(tn.une_plus, Math.round(tn.une_plus.kg * 1000 + gPinces), 1, tn.une_plus.consigne + ` (${ajout})`)); pincesAvecTour = true; if (tn.une_plus.a_confirmer) notes.push("tour de Noël : " + tn.une_plus.a_confirmer); }
         else colis.push(boiteTour(tn.une, Math.round(tn.une.kg * 1000), 1, tn.une.consigne));
       }
