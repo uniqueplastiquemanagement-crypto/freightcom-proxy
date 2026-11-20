@@ -7,7 +7,7 @@ const crypto = require("crypto");
 const fs = require("fs");
 const pathMod = require("path");
 
-const SHA_MOTEUR = "ea7e60e86e47960f35ead44ab91e6aa8f922d6b9fd14b8b83918de8068f66d5e";
+const SHA_MOTEUR = "b3724d1133e94444a5e585f3a9694523efb38b78597de002b0a057c297058068";
 let M = null, erreurMoteur = null;
 try {
   const f = pathMod.join(__dirname, "moteur_v5.js");

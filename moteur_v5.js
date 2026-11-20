@@ -383,7 +383,10 @@ function planCommande(c, regle) {
   // Campagne École polyvalente St-Jérôme (Alexandre, 15 nov. 2026) : les boîtes partent avec la livraison de l'école, jamais par la poste.
   const campagne = (c.discountCodes || []).map(String).find(k => /^stjerome-/i.test(k));
   if (campagne) raisons.push(R("CAMPAGNE", `NE PAS EXPÉDIER : code ${campagne} (campagne École polyvalente St-Jérôme, livrée avec les boîtes de l'école)`));
-  if (c.displayFinancialStatus !== "PAID") {
+  // Remboursée en partie (Alexandre, 19 nov. 2026 : « les commandes qui ont eu des remboursements n'ont pas à être dans À régler ») :
+  // elle part comme une commande payée. Remboursée au complet : toujours à régler.
+  if (c.displayFinancialStatus === "PARTIALLY_REFUNDED") notes.push("remboursée en partie : expédiée comme une commande payée");
+  else if (c.displayFinancialStatus !== "PAID") {
     if (estB2B) notes.push(`B2B : paiement ${String(c.displayFinancialStatus || "inconnu").toLowerCase()} (modalités de paiement)`);
     else raisons.push(R("PAIEMENT", `paiement ${String(c.displayFinancialStatus || "inconnu").toLowerCase()}`));
   }
