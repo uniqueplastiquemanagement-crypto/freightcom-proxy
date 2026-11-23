@@ -36,7 +36,7 @@ const { M, erreurMoteur, SHOP, appShopify, shopify, REQ_COMMANDES, cpNorm, maint
 let PDFDocument = null;
 try { ({ PDFDocument } = require("pdf-lib")); } catch { /* signalé par l'outil etat */ }
 
-const VERSION = "1.5.1";
+const VERSION = "1.5.2";
 const PORT = process.env.PORT || 10000;
 const PROXY_KEY = process.env.PROXY_KEY || "";
 const ENV = (process.env.FREIGHTCOM_ENV || "test").toLowerCase();
@@ -488,6 +488,12 @@ const OUTILS = [
       partie: { type: "integer", minimum: 0, maximum: 19 }, parties: { type: "integer", minimum: 1, maximum: 20 },
       html: { type: "string", minLength: 1, maxLength: 307200, description: "bons_b2b : cette partie du document HTML (bons d'expédition)" },
       base64: { type: "string", minLength: 1, maxLength: 307200, description: "etiquettes : cette partie du PDF en base64" } } } },
+  // 1.5.2 (23 nov. 2026) : l'Espace demande si ses impressions sont sorties à l'usine, pour avertir la personne (notification).
+  { name: "etat_impression", description: "Pour des documents (bons, réimpressions) et des lots d'étiquettes : déjà imprimés au PC de l'usine ou pas encore. Lecture seulement, sans contenu.",
+    annotations: { title: "Impressions sorties à l'usine", readOnlyHint: true, openWorldHint: false },
+    inputSchema: { type: "object", additionalProperties: false, properties: {
+      documents: { type: "array", maxItems: 50, items: { type: "string", pattern: "^D\\d{8}-\\d{6}-[a-z0-9]{4}$" } },
+      lots: { type: "array", maxItems: 50, items: { type: "string", pattern: "^L\\d{8}-\\d{6}-[a-z0-9]{4}$" } } } } },
   { name: "etat", description: "Réglages de la passerelle et du connecteur : environnement Freightcom, achats ouverts, garde-fou technique, app Shopify branchée, magasinage Shopify (dernière lecture, signaux), lot en cours.",
     annotations: { title: "État de la passerelle", readOnlyHint: true, openWorldHint: false },
     inputSchema: { type: "object", additionalProperties: false, properties: {} } },
@@ -504,6 +510,15 @@ async function appelerOutil(nom, args) {
   }
   if (nom === "tarifs_shopify") return { commandes: magasinage.etatCommandes(args.commandes) };
   if (nom === "imprimer_document") return recevoirDocument(args);
+  if (nom === "etat_impression") {
+    // null = inconnu de la passerelle (redémarrée, ou plus de 2 h pour un document) : on ne saura plus s'il est sorti.
+    const liste = (x, re) => (Array.isArray(x) ? [...new Set(x.map(String))].filter((v) => re.test(v)).slice(0, 50) : []);
+    nettoyer(); nettoyerDocs();
+    const documents = {}, lotsVus = {};
+    for (const d of liste(args.documents, RE_DOC)) { const x = docs.get(d); documents[d] = x ? { type: x.type, pret: !!x.html, imprime_usine: x.imprime_usine || null } : null; }
+    for (const l of liste(args.lots, RE_LOT)) { const x = lots.get(l); lotsVus[l] = x ? { statut: x.statut, pages: x.pages || 0, pdf: !!x.pdf, imprime_usine: x.imprime_usine || null } : null; }
+    return { documents, lots: lotsVus, impression_usine: imprimanteUsine() };
+  }
   const id = String(args.lot_id || "");
   if (!RE_LOT.test(id)) throw new Error("lot_id invalide");
   if (nom === "etat_lot") { const l = lots.get(id); if (!l) throw new Error("lot inconnu de la passerelle (redémarrée ?) : relancer le lot depuis le Poste"); return vueLot(l); }
