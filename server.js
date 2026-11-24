@@ -18,6 +18,7 @@ const base = require("./base");
 const connecteur = require("./connecteur");
 const espace = require("./espace");
 const magasinage = require("./magasinage");
+const chitchats = require("./chitchats");
 
 const TOKEN      = process.env.UPSTREAM_TOKEN;
 const PROXY_KEY  = process.env.PROXY_KEY;
@@ -309,7 +310,7 @@ async function traiterRequete(req, res) {
     res.end(JSON.stringify(obj));
   };
 
-  if (req.url === "/" || req.url === "/health") return send(200, { ok: true, env: ENV, achats_actives: ACHATS_ACTIVES, max_achats_jour: MAX_ACHATS_JOUR, garde_technique_ttc: GARDE_TECHNIQUE, ramassages_actives: RAMASSAGES_ACTIVES, max_ramassages_jour: MAX_RAM_JOUR, max_adresses_jour: MAX_ADRESSES_JOUR, jeton_geocoder: !!GEOCODER_AUTH, chemin_ramassage: CHEMIN_RAM, demarre_le: DEMARRE_LE, connecteur: connecteur.etatPublic(), magasinage: Object.assign(magasinage.etatPublic(), { cle_lecture: !!CLE_MAGASINAGE }) });
+  if (req.url === "/" || req.url === "/health") return send(200, { ok: true, env: ENV, achats_actives: ACHATS_ACTIVES, max_achats_jour: MAX_ACHATS_JOUR, garde_technique_ttc: GARDE_TECHNIQUE, ramassages_actives: RAMASSAGES_ACTIVES, max_ramassages_jour: MAX_RAM_JOUR, max_adresses_jour: MAX_ADRESSES_JOUR, jeton_geocoder: !!GEOCODER_AUTH, chemin_ramassage: CHEMIN_RAM, demarre_le: DEMARRE_LE, connecteur: connecteur.etatPublic(), magasinage: Object.assign(magasinage.etatPublic(), { cle_lecture: !!CLE_MAGASINAGE }), chitchats: chitchats.etatPublic() });
   const path = req.url.split("?")[0];
   // Connecteur du Poste : protégé par son adresse secrète (mauvais jeton = 404), pas par x-proxy-key.
   if (path.startsWith("/mcp/")) return connecteur.traiter(req, res, path).catch(() => { try { if (!res.headersSent) send(500, { error: "erreur du connecteur" }); else res.end(); } catch {} });
@@ -322,6 +323,8 @@ async function traiterRequete(req, res) {
     if (!CLE_MAGASINAGE) return send(503, { error: "magasinage ferme : MAGASINAGE_CLE trop courte (32 caracteres au moins) ou egale a PROXY_KEY" });
     if (!egal(req.headers["x-cle-magasinage"] || "", CLE_MAGASINAGE)) return send(401, { error: "cle de lecture du magasinage invalide (en-tete x-cle-magasinage)" });
   } else if (!egal(req.headers["x-proxy-key"] || "", PROXY_KEY)) return send(401, { error: "cle de passerelle invalide" });
+  // Chit Chats (colis vers les États-Unis), étape 1 : la clé marche-t-elle ? Lecture seulement, rien de la clé n'est renvoyé.
+  if (path === "/chitchats/etat" && req.method === "GET" && !estMagasinage) return send(200, await chitchats.etat());
 
   const regle = ALLOW.find(r => r.m.includes(req.method) && r.re.test(path));
   if (!regle || !!regle.magasinage !== estMagasinage) return send(403, { error: "chemin ou methode non autorise", path, method: req.method });
