@@ -167,7 +167,8 @@ function resultat(s, deja, t) {
   return { statut: deja ? "deja_achete" : "achete", raison: deja ? "étiquette Chit Chats déjà achetée pour cette commande : aucune deuxième facture" : null,
     shipment_id: "CC-" + String(s.id), transporteur: "Chit Chats", service: (t && t.service) || String(s.postage_description || s.postage_type || "").slice(0, 80),
     montant_ttc: n(s.payment_amount) ?? (t ? t.montant : null), delai: t ? t.delai : null,
-    suivi: s.carrier_tracking_code || s.tracking_code || null, tracking_url: s.tracking_url || `https://chitchats.com/tracking/${s.id}` };
+    // Sans numéro du transporteur (pas encore donné par Chit Chats), le numéro d'envoi Chit Chats sert de suivi : sa page de suivi marche.
+    suivi: s.carrier_tracking_code || s.tracking_code || String(s.id), tracking_url: s.tracking_url || `https://chitchats.com/tracking/${s.id}` };
 }
 // Lot Chit Chats du jour (« UP aaaa-mm-jj ») : les colis du jour y sont ajoutés ; Canpar ramasse le lot (réservé dans le site).
 const lots = new Map();
