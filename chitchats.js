@@ -96,4 +96,146 @@ async function essaiTarifs() {
   return Object.assign({ ok: true }, v, { suppression });
 }
 
-module.exports = { configure, etatPublic, etat, appel, creerNonPaye, supprimer, essaiTarifs };
+// ---------- Étape 3 (1.7.0) : étiquette Chit Chats d'une commande hors Canada (Alexandre, 24 nov. 2026 : « Toutes les colis aux US
+// vont passer par là » ; « qu'on soit worldwide » ; le moins cher, plus rapide si le client a payé un service rapide).
+// Appelé par le connecteur (bouton du Poste) seulement. Mêmes verrous que Freightcom : ACHATS_ACTIVES=oui, une étiquette par commande
+// (un envoi déjà payé pour cette commande est repris, jamais racheté), garde-fou technique de 500 $.
+const ACHATS = () => (process.env.ACHATS_ACTIVES || "non").toLowerCase() === "oui";
+const GARDE = Math.min(1000, Number(process.env.GARDE_TECHNIQUE_DOLLARS || "500") || 500);
+// Certification ACEUM-31102 (approuvée le 24 nov. 2026, valide jusqu'au 24 nov. 2027) : description et code EXACTS, sinon pas de franchise.
+const DOUANE = { description: "Plastic hair claw clips, recycled plastic body with metal spring", hs: "9615114000", origine: "CA" };
+// Les services américains (Select, Edge…) exigent le fabricant depuis la fin de l'exemption américaine (aide de Chit Chats, 29 oct. 2026).
+const FABRICANT = { manufacturer_contact: "Unique Plastique inc.", manufacturer_street: "700 Rue Jean-Marchand", manufacturer_city: "Lévis",
+  manufacturer_postal_code: "G6Y 9G6", manufacturer_province_code: "QC", manufacturer_country_code: "CA" };
+// Services avec suivi complet seulement (jamais Media Mail, Library Mail, ni les services sans suivi).
+const SERVICES_PERMIS = /^(chit_chats_(us_(select|edge|connect|courier)|international_(tracked|select))|usps_(ground_advantage|priority|express))$/;
+const PAYES = new Set(["ready", "in_transit", "received", "released", "inducted", "resolved", "delivered", "exception", "postage_requested"]);
+const pause = (ms) => new Promise((r) => setTimeout(r, ms));
+function joursMax(d) { const m = String(d || "").match(/(\d+)\s*[-–]\s*(\d+)/); if (m) return Number(m[2]); const n = String(d || "").match(/(\d+)/); return n ? Number(n[1]) : 99; }
+function choisirTarif(tarifs, express) {
+  const ok = (tarifs || []).filter((t) => SERVICES_PERMIS.test(t.postage_type) && t.montant > 0);
+  if (!ok.length) return null;
+  if (express) { const min = Math.min(...ok.map((t) => joursMax(t.delai))); return ok.filter((t) => joursMax(t.delai) === min).sort((a, b) => a.montant - b.montant)[0]; }
+  return ok.slice().sort((a, b) => a.montant - b.montant || joursMax(a.delai) - joursMax(b.delai))[0];
+}
+// cmd = { no, adresse (Shopify shippingAddress), colis (du moteur : longueur_po…, poids_g), valeur_cad (sous-total des articles), nb_pinces }
+function envoiCommande(cmd) {
+  const net = (v, n = 60) => String(v || "").replace(/\s+/g, " ").trim().slice(0, n);
+  const a = cmd.adresse || {}, c = cmd.colis || {};
+  const personne = net(a.name || [a.firstName, a.lastName].filter(Boolean).join(" "));
+  const entreprise = net(a.company).length > 1 ? net(a.company) : "";
+  const q = Math.max(1, Math.round(Number(cmd.nb_pinces) || 1));
+  const total = Math.max(1, Math.round((Number(cmd.valeur_cad) || 0) * 100) / 100);
+  const g = Math.max(1, Math.round(Number(c.poids_g) || 0));
+  const tel = String(a.phone || "").replace(/[^\d+]/g, "").slice(0, 20);
+  const e = {
+    name: personne || entreprise, address_1: net(a.address1), city: net(a.city, 40), country_code: String(a.countryCodeV2 || "").toUpperCase(),
+    package_contents: "merchandise", description: DOUANE.description, value: total.toFixed(2), value_currency: "cad",
+    order_id: String(cmd.no), order_store: "Unique Plastique",
+    package_type: "parcel", size_unit: "in", size_x: Number(c.longueur_po), size_y: Number(c.largeur_po), size_z: Number(c.hauteur_po),
+    weight_unit: "g", weight: g, ship_date: "today",
+    line_items: [Object.assign({ quantity: q, description: DOUANE.description, value_amount: (total / q).toFixed(2), currency_code: "cad",
+      weight: Math.max(1, Math.floor(g / q)), weight_unit: "g", hs_tariff_code: DOUANE.hs, origin_country: DOUANE.origine, sku_code: "UP-PINCE" }, FABRICANT)],
+  };
+  const a2 = [entreprise && entreprise !== e.name ? entreprise : "", net(a.address2)].filter(Boolean).join(", ").slice(0, 60);
+  if (a2) e.address_2 = a2;
+  if (a.provinceCode) e.province_code = String(a.provinceCode).toUpperCase().slice(0, 3);
+  if (a.zip) e.postal_code = net(a.zip, 12);
+  if (tel.length >= 7) e.phone = tel;
+  return e;
+}
+function listeEnvois(j) { const l = Array.isArray(j) ? j : (j && (j.shipments || j.data)) || []; return l.map((s) => (s && s.shipment) || s).filter(Boolean); }
+// Envois déjà faits chez Chit Chats pour cette commande (order_id = numéro de la commande Shopify).
+async function envoisDeLaCommande(no) {
+  const r = await appel("GET", `/shipments?q=${encodeURIComponent(String(no))}&limit=100`);
+  if (r.status !== 200) throw new Error(`lecture des envois Chit Chats impossible (${r.status}) : achat suspendu pour ne pas acheter deux fois`);
+  return listeEnvois(r.json).filter((s) => String(s.order_id || "") === String(no));
+}
+async function etiquettePdf(s) {
+  const url = String((s && s.postage_label_pdf_url) || "");
+  if (!/^https:\/\//.test(url)) return null;
+  const h = new URL(url).hostname;
+  // La clé ne part que vers chitchats.com (jamais vers un autre hôte, ex. un stockage de fichiers).
+  const entetes = /(^|\.)chitchats\.com$/.test(h) ? { Authorization: JETON } : {};
+  const r = await fetch(url, { headers: entetes, redirect: "follow", signal: AbortSignal.timeout(30000) });
+  if (!r.ok) return null;
+  const b = Buffer.from(await r.arrayBuffer());
+  return b.subarray(0, 5).toString("latin1") === "%PDF-" ? b : null;
+}
+function resultat(s, deja, t) {
+  const n = (v) => (Number.isFinite(Number(v)) && Number(v) > 0 ? Math.round(Number(v) * 100) / 100 : null);
+  return { statut: deja ? "deja_achete" : "achete", raison: deja ? "étiquette Chit Chats déjà achetée pour cette commande : aucune deuxième facture" : null,
+    shipment_id: "CC-" + String(s.id), transporteur: "Chit Chats", service: (t && t.service) || String(s.postage_description || s.postage_type || "").slice(0, 80),
+    montant_ttc: n(s.payment_amount) ?? (t ? t.montant : null), delai: t ? t.delai : null,
+    suivi: s.carrier_tracking_code || s.tracking_code || null, tracking_url: s.tracking_url || `https://chitchats.com/tracking/${s.id}` };
+}
+// Lot Chit Chats du jour (« UP aaaa-mm-jj ») : les colis du jour y sont ajoutés ; Canpar ramasse le lot (réservé dans le site).
+const lots = new Map();
+async function lotDuJour() {
+  const jour = new Intl.DateTimeFormat("en-CA", { timeZone: "America/Toronto" }).format(new Date());
+  const nom = `UP ${jour}`;
+  if (lots.has(nom)) return lots.get(nom);
+  const r = await appel("GET", "/batches?status=pending&limit=100");
+  const l = (Array.isArray(r.json) ? r.json : (r.json && r.json.batches) || []).map((b) => (b && b.batch) || b);
+  let b = l.find((x) => String(x.description || "") === nom);
+  if (!b) {
+    const c = await appel("POST", "/batches", { description: nom });
+    if (c.status !== 201 && c.status !== 200) throw new Error(erreurChitChats(c));
+    b = c.json && (c.json.batch || c.json);
+    if (!b || b.id == null) {   // l'identifiant peut n'être que dans l'en-tête Location : relire la liste
+      const r2 = await appel("GET", "/batches?status=pending&limit=100");
+      b = (Array.isArray(r2.json) ? r2.json : (r2.json && r2.json.batches) || []).map((x) => (x && x.batch) || x).find((x) => String(x.description || "") === nom);
+    }
+  }
+  if (!b || b.id == null) throw new Error("lot Chit Chats créé sans identifiant");
+  lots.set(nom, { id: Number(b.id), nom });
+  return lots.get(nom);
+}
+async function ajouterAuLot(id) {
+  try {
+    const lot = await lotDuJour();
+    const r = await appel("PATCH", "/shipments/add_to_batch", { batch_id: lot.id, shipment_ids: [Number(id) || String(id)] });
+    return r.status === 200 ? { lot: lot.nom } : { lot: null, note: `ajout au lot refusé (${r.status})` };
+  } catch (e) { return { lot: null, note: "lot du jour : " + String((e && e.message) || e).slice(0, 120) }; }
+}
+// essai = true : crée l'envoi non payé, choisit le tarif, puis le SUPPRIME (rien n'est acheté).
+async function acheterCommande(cmd, { essai = false } = {}) {
+  if (!configure()) return { statut: "saute", raison: "Chit Chats pas configuré dans Render" };
+  if (!essai && !ACHATS()) return { statut: "saute", raison: "achats désactivés (ACHATS_ACTIVES)" };
+  const ex = await envoisDeLaCommande(cmd.no);
+  const paye = ex.find((s) => PAYES.has(String(s.status)));
+  if (paye) {
+    if (essai) return { statut: "essai", raison: "déjà achetée chez Chit Chats", existant: resultat(paye, true) };
+    let s = paye;
+    for (let i = 0; i < 15 && s.status === "postage_requested"; i++) { await pause(2000); const g = await appel("GET", `/shipments/${s.id}`); s = (g.json && (g.json.shipment || g.json)) || s; }
+    const res = resultat(s, true); res.pdf = await etiquettePdf(s); return res;
+  }
+  // Anciens envois non payés de cette commande (essais, achat interrompu) : supprimés pour repartir propre.
+  for (const s of ex.filter((x) => ["unpaid", "pending", "postage_purchase_failed"].includes(String(x.status)))) { try { await supprimer(s.id); } catch { /* sans gravité */ } }
+  const envoi = envoiCommande(cmd);
+  const v = await creerNonPaye(envoi);
+  const t = choisirTarif(v.tarifs, !!cmd.express);
+  const base = { tarifs: v.tarifs.map((x) => ({ service: x.service, montant: x.montant, delai: x.delai })) };
+  if (essai || !t || !(t.montant > 0) || t.montant > GARDE) {
+    let suppression = null; try { suppression = await supprimer(v.id); } catch (e) { suppression = { supprime: false }; }
+    if (essai) return Object.assign({ statut: "essai", choisi: t ? { service: t.service, postage_type: t.postage_type, montant: t.montant, delai: t.delai } : null, envoi: { pays: envoi.country_code, boite: `${envoi.size_x}x${envoi.size_y}x${envoi.size_z}`, poids_g: envoi.weight, valeur_cad: envoi.value, pinces: envoi.line_items[0].quantity }, suppression }, base);
+    return Object.assign({ statut: "saute", raison: !t ? `aucun service Chit Chats avec suivi pour ${envoi.country_code}` : `prix anormal (${t.montant} $ ; garde-fou de ${GARDE} $) : à vérifier` }, base);
+  }
+  const rb = await appel("PATCH", `/shipments/${v.id}/buy`, { postage_type: t.postage_type });
+  if (rb.status !== 200) { try { await supprimer(v.id); } catch { /* sans gravité */ } return Object.assign({ statut: "erreur", raison: "achat Chit Chats refusé : " + erreurChitChats(rb) }, base); }
+  let s = null;
+  for (let i = 0; i < 30; i++) {
+    await pause(2000);
+    const g = await appel("GET", `/shipments/${v.id}`);
+    s = g.json && (g.json.shipment || g.json);
+    if (s && (String(s.status) === "ready" || String(s.status) === "postage_purchase_failed")) break;
+  }
+  if (!s || String(s.status) === "postage_purchase_failed") return Object.assign({ statut: "erreur", raison: "Chit Chats n'a pas pu acheter l'affranchissement" + (s ? "" : " (pas de réponse)") }, base);
+  const res = Object.assign(resultat(s, false, t), base);
+  if (String(s.status) !== "ready") res.raison = "achat demandé, étiquette pas encore prête chez Chit Chats : réimprimer plus tard";
+  res.pdf = await etiquettePdf(s);
+  Object.assign(res, await ajouterAuLot(s.id));
+  return res;
+}
+
+module.exports = { configure, etatPublic, etat, appel, creerNonPaye, supprimer, essaiTarifs, acheterCommande, _test: { envoiCommande, choisirTarif, joursMax, DOUANE } };

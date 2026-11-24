@@ -327,6 +327,12 @@ async function traiterRequete(req, res) {
   if (path === "/chitchats/etat" && req.method === "GET" && !estMagasinage) return send(200, await chitchats.etat());
   // Étape 2 : essai de tarifs US demandé par Alexandre (envoi non payé créé, tarifs lus, envoi supprimé ; jamais d'achat).
   if (path === "/chitchats/essai-tarifs" && req.method === "POST" && !estMagasinage) return send(200, await chitchats.essaiTarifs());
+  // Étape 3 : essai SANS ACHAT sur une vraie commande hors Canada ({"no": "12345"}) : envoi non payé créé, tarif choisi, envoi supprimé.
+  if (path === "/chitchats/essai-commande" && req.method === "POST" && !estMagasinage) {
+    let corps = ""; for await (const morceau of req) { corps += morceau; if (corps.length > 2048) return send(413, { error: "corps trop gros" }); }
+    let no = null; try { no = String(JSON.parse(corps || "{}").no || ""); } catch { return send(400, { error: "JSON invalide" }); }
+    try { return send(200, await connecteur.essaiChitChats(no)); } catch (e) { return send(502, { error: "essai Chit Chats : " + String((e && e.message) || e).slice(0, 200) }); }
+  }
 
   const regle = ALLOW.find(r => r.m.includes(req.method) && r.re.test(path));
   if (!regle || !!regle.magasinage !== estMagasinage) return send(403, { error: "chemin ou methode non autorise", path, method: req.method });

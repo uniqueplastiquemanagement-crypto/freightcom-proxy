@@ -29,6 +29,7 @@
 const crypto = require("crypto");
 const B = require("./base");
 const magasinage = require("./magasinage");
+const chitchats = require("./chitchats");
 // Module de la table Shopify : s'il manque ou plante au chargement, le connecteur et la passerelle restent debout (pas d'estimation).
 let TS = null;
 try { TS = require("./table_shopify"); } catch { /* signalé par l'outil etat */ }
@@ -36,7 +37,7 @@ const { M, erreurMoteur, SHOP, appShopify, shopify, REQ_COMMANDES, cpNorm, maint
 let PDFDocument = null;
 try { ({ PDFDocument } = require("pdf-lib")); } catch { /* signalé par l'outil etat */ }
 
-const VERSION = "1.6.2";
+const VERSION = "1.7.0";
 const PORT = process.env.PORT || 10000;
 const PROXY_KEY = process.env.PROXY_KEY || "";
 const ENV = (process.env.FREIGHTCOM_ENV || "test").toLowerCase();
@@ -267,6 +268,46 @@ function vueLot(l) {
 const rien = (raison, plus = {}) => Object.assign({ statut: "saute", raison, transporteur: null, service: null, montant_ttc: null, suivi: null, tracking_url: null, shipment_id: null, pages: 0 }, plus);
 const erreur = (raison, plus = {}) => Object.assign(rien(raison, plus), { statut: "erreur" });
 
+// ---------- Hors Canada : Chit Chats (24 nov. 2026) ----------
+// Codes du plan qui ne bloquent pas un envoi Chit Chats : HORS_CANADA (c'est le but), ADRESSE (le moteur exige une province, absente dans
+// bien des pays : l'adresse est revérifiée ici), CODE_POSTAL (format canadien seulement) et les raisons déjà permises au Canada.
+const CODES_HORS_CANADA_OK = new Set(["HORS_CANADA", "ADRESSE", "CODE_POSTAL", ...RAISONS_PERMISES]);
+async function horsCanada(c, p, no, { essai = false, achatsPermis = false } = {}) {
+  const a = c.shippingAddress || {};
+  if (!essai && !achatsPermis) return rien("règle des boîtes en mode essai : aucun achat");
+  const autres = (p.raisons || []).filter((r) => !CODES_HORS_CANADA_OK.has(r.code));
+  if (autres.length) return rien(autres.map((r) => r.texte).join(" ; "));
+  if (!a.address1 || !a.city || !a.countryCodeV2) return rien("adresse incomplète (rue, ville ou pays)");
+  if (a.countryCodeV2 === "US" && (!a.zip || !a.provinceCode)) return rien("adresse américaine incomplète (code ZIP ou État)");
+  if (!p.boite || !Array.isArray(p.colis) || p.colis.length !== 1) return rien("international en plusieurs boîtes : à faire à la main dans Chit Chats");
+  if ((Number(p.nb_cannes) || 0) > 0 || (Number(p.presentoirs) || 0) > 0) return rien("international avec autre chose que des pinces (présentoir, cannes) : à faire à la main (douane)");
+  if (!chitchats.configure()) return rien("Chit Chats pas configuré dans Render");
+  let valeur = null;
+  try {
+    const d = await shopify("query($id: ID!) { order(id: $id) { currentSubtotalPriceSet { shopMoney { amount currencyCode } } } }", { id: c.id });
+    const m = d && d.order && d.order.currentSubtotalPriceSet && d.order.currentSubtotalPriceSet.shopMoney;
+    if (!m || String(m.currencyCode || "CAD").toUpperCase() !== "CAD") throw new Error("devise");
+    valeur = Number(m.amount);
+  } catch (e) { return erreur("valeur de la commande illisible dans Shopify (douane) : rien n'est acheté"); }
+  const base = { plateforme: "chitchats", boite: p.boite.nom, poids_lb: p.poids_lb, boite_choisie: !!p.boite_choisie, pays: a.countryCodeV2 };
+  try {
+    const r = await chitchats.acheterCommande({ no, adresse: a, colis: p.colis[0], valeur_cad: valeur, nb_pinces: p.nb_pinces, express: !!p.express }, { essai });
+    return Object.assign({ transporteur: null, service: null, montant_ttc: null, suivi: null, tracking_url: null, shipment_id: null, pages: 0 }, base, r);
+  } catch (e) { return erreur("Chit Chats : " + String((e && e.message) || e).slice(0, 200), base); }
+}
+// Essai sans achat sur une vraie commande (route POST /chitchats/essai-commande de la passerelle) : lit la commande et la règle du dépôt,
+// crée l'envoi non payé chez Chit Chats, choisit le tarif, puis supprime l'envoi.
+async function essaiChitChats(no) {
+  if (!/^\d{3,7}$/.test(String(no || ""))) return { ok: false, raison: "numéro de commande invalide" };
+  if (!M || !B.regleDepot) return { ok: false, raison: erreurMoteur || B.erreurRegle || "règle du dépôt absente" };
+  const data = await shopify(REQ_COMMANDES, { q: `name:#${no}` });
+  const c = ((data && data.orders && data.orders.nodes) || []).find((o) => String(o.name || "").replace("#", "") === String(no));
+  if (!c) return { ok: false, raison: "commande introuvable dans Shopify" };
+  const p = M.planCommande(c, B.regleDepot);
+  if (!(p.raisons || []).some((r) => r.code === "HORS_CANADA")) return { ok: false, raison: "commande au Canada : pas pour Chit Chats" };
+  const r = await horsCanada(c, p, String(no), { essai: true });
+  return Object.assign({ ok: r.statut === "essai", no: String(no), boite: p.boite ? p.boite.nom : null, poids_g: p.poids_g, pinces: p.nb_pinces }, r);
+}
 async function pagesPdf(buf) { if (!PDFDocument) return 1; try { return (await PDFDocument.load(buf, { updateMetadata: false })).getPageCount() || 1; } catch (e) { return 1; } }
 async function traiterLot(l, regle) {
   try {
@@ -309,6 +350,16 @@ async function traiterLot(l, regle) {
       if (p.statut === "IGNORER") { l.resultats[no] = rien(textes(p.raisons || []) || "ignorée"); continue; }
       // Note de la commande « NE PAS EXPÉDIER » (souvent du B2B en attente) : jamais d'étiquette, même si la commande est dans le lot.
       if (/ne\s+pas\s+exp[ée]di/i.test(String(c.note || ""))) { l.resultats[no] = rien("la note de la commande dit de ne pas expédier"); continue; }
+      // Hors Canada (Alexandre, 24 nov. 2026) : étiquette Chit Chats (États-Unis et reste du monde), jamais Freightcom.
+      if ((p.raisons || []).some((r) => r.code === "HORS_CANADA")) {
+        const r = await horsCanada(c, p, no, { achatsPermis: rUn.achats_permis === true });
+        const pdf = r.pdf; delete r.pdf;
+        if (pdf) { l.pdfs.push(pdf); r.pages = await pagesPdf(pdf); }
+        else if (r.statut === "achete" || r.statut === "deja_achete") r.raison = (r.raison ? r.raison + " ; " : "") + "étiquette achetée mais PDF non récupéré";
+        if (r.statut === "achete" && Number.isFinite(r.montant_ttc)) l.cout += r.montant_ttc;
+        l.resultats[no] = r;
+        continue;
+      }
       // Estimation Shopify par la table mesurée (aucune lecture, aucun crédit). Sans estimation : Freightcom seulement.
       // B2B : même chemin que le B2C depuis le 26 oct. 2026, 18 h 46 (Alexandre : « pareil comme en B2C », avec la règle des
       // boîtes 26d) ; avant, un B2B sans estimation Shopify restait à étiqueter dans Shopify.
@@ -461,7 +512,7 @@ async function traiterLot(l, regle) {
 
 // ---------- Outils ----------
 const OUTILS = [
-  { name: "lancer_lot", description: "Démarre l'achat des étiquettes 4×6 d'un lot du Poste d'expédition d'Unique Plastique (Freightcom : en production, de VRAIES étiquettes payées par le moyen de paiement de la passerelle ; en test, le bac à sable). La passerelle relit les commandes dans Shopify, vérifie les adresses signalées, redemande les tarifs Freightcom en direct, les compare aux prix Shopify contre-vérifiés (deux lectures concordantes du calculateur) ou, à défaut, à l'estimation de la table Shopify mesurée (même boîte, même poids, même région ; Shopify retenu seulement s'il bat Freightcom d'au moins la marge) et prend le moins cher avant taxes parmi UPS, GLS et Postes Canada, sans plafond de prix (garde-fou technique de 500 $ seulement). Freightcom moins cher : achète au plus une étiquette par commande et assemble un seul PDF. Shopify moins cher : n'achète rien et le dit (statut shopify_moins_cher). Répond tout de suite ; suivre avec etat_lot. Même lot_id = même lot (rien n'est racheté).",
+  { name: "lancer_lot", description: "Démarre l'achat des étiquettes 4×6 d'un lot du Poste d'expédition d'Unique Plastique (Freightcom : en production, de VRAIES étiquettes payées par le moyen de paiement de la passerelle ; en test, le bac à sable). La passerelle relit les commandes dans Shopify, vérifie les adresses signalées, redemande les tarifs Freightcom en direct, les compare aux prix Shopify contre-vérifiés (deux lectures concordantes du calculateur) ou, à défaut, à l'estimation de la table Shopify mesurée (même boîte, même poids, même région ; Shopify retenu seulement s'il bat Freightcom d'au moins la marge) et prend le moins cher avant taxes parmi UPS, GLS et Postes Canada, sans plafond de prix (garde-fou technique de 500 $ seulement). Commande hors Canada (depuis 1.7.0) : étiquette Chit Chats (le moins cher avec suivi, plus rapide si le client l'a payé ; douane ACEUM remplie), ajoutée au lot Chit Chats du jour. Freightcom moins cher : achète au plus une étiquette par commande et assemble un seul PDF. Shopify moins cher : n'achète rien et le dit (statut shopify_moins_cher). Répond tout de suite ; suivre avec etat_lot. Même lot_id = même lot (rien n'est racheté).",
     annotations: { title: "Acheter les étiquettes d'un lot", readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
     inputSchema: { type: "object", additionalProperties: false, required: ["lot_id", "commandes", "regle"], properties: {
       lot_id: { type: "string", pattern: "^L\\d{8}-\\d{6}-[a-z0-9]{4}$", description: "identifiant du lot écrit par le Poste" },
@@ -740,4 +791,4 @@ async function traiterImpression(req, res, chemin) {
 }
 
 
-module.exports = { traiter, traiterImpression, etatPublic, jetonConnecteur, jetonImpression, _test: { docs, recevoirDocument, nomFichier, dateExpedition, signauxAdresse, civiqueEtRue, numeroCivique, rueEgale, villeNorm, propre, messageAchat, validerAjustements, ajuster, appelerOutil, lots } };
+module.exports = { traiter, traiterImpression, etatPublic, jetonConnecteur, jetonImpression, essaiChitChats, _test: { horsCanada, docs, recevoirDocument, nomFichier, dateExpedition, signauxAdresse, civiqueEtRue, numeroCivique, rueEgale, villeNorm, propre, messageAchat, validerAjustements, ajuster, appelerOutil, lots } };
