@@ -131,7 +131,7 @@ function envoiCommande(cmd) {
   const e = {
     name: personne || entreprise, address_1: net(a.address1), city: net(a.city, 40), country_code: String(a.countryCodeV2 || "").toUpperCase(),
     package_contents: "merchandise", description: DOUANE.description, value: total.toFixed(2), value_currency: "cad",
-    order_id: String(cmd.no), order_store: "Unique Plastique",
+    order_id: String(cmd.no),   // order_store omis : Chit Chats le refuse (« Unknown order_store »), il attend le type d'une boutique branchée
     package_type: "parcel", size_unit: "in", size_x: Number(c.longueur_po), size_y: Number(c.largeur_po), size_z: Number(c.hauteur_po),
     weight_unit: "g", weight: g, ship_date: "today",
     line_items: [Object.assign({ quantity: q, description: DOUANE.description, value_amount: (total / q).toFixed(2), currency_code: "cad",
