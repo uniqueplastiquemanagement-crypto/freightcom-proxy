@@ -239,4 +239,29 @@ async function acheterCommande(cmd, { essai = false } = {}) {
   return res;
 }
 
-module.exports = { configure, etatPublic, etat, appel, creerNonPaye, supprimer, essaiTarifs, acheterCommande, _test: { envoiCommande, choisirTarif, joursMax, DOUANE } };
+// Grille de tarifs (Alexandre, 24 nov. 2026 : « vérifie les prix… selon des régions ») : pour chaque cas (pays, adresse fictive, boîte,
+// poids, valeur), le MÊME corps que l'achat (douane ACEUM, fabricant) est créé non payé, ses tarifs sont lus, l'envoi est supprimé.
+// Jamais d'achat. 40 cas au plus.
+async function essaiGrille(cas) {
+  if (!configure()) return { ok: false, raison: "Chit Chats pas configuré" };
+  if (!Array.isArray(cas) || !cas.length || cas.length > 40) return { ok: false, raison: "1 à 40 cas" };
+  const out = [];
+  for (const c of cas) {
+    const k = String(c.k || "").slice(0, 60);
+    const b = Array.isArray(c.boite) ? c.boite.map(Number) : [];
+    if (!/^[A-Z]{2}$/.test(String(c.pays || "")) || b.length !== 3 || b.some((x) => !(x > 0 && x < 60)) || !(Number(c.poids_g) > 0 && Number(c.poids_g) < 30000)) { out.push({ k, erreur: "cas invalide" }); continue; }
+    const cmd = { no: "ESSAI-GRILLE", express: false, valeur_cad: Number(c.valeur) || 15, nb_pinces: Number(c.pinces) || 1,
+      adresse: { name: "Essai Unique Plastique", address1: String(c.adresse || "1 Main St").slice(0, 60), city: String(c.ville || "").slice(0, 40), provinceCode: c.prov || null, zip: String(c.zip || ""), countryCodeV2: c.pays },
+      colis: { longueur_po: b[0], largeur_po: b[1], hauteur_po: b[2], poids_g: Number(c.poids_g) } };
+    let v = null;
+    try {
+      v = await creerNonPaye(envoiCommande(cmd));
+      const t = choisirTarif(v.tarifs, false);
+      out.push({ k, choisi: t ? { service: t.service, montant: t.montant, delai: t.delai } : null, tarifs: v.tarifs.map((x) => ({ service: x.service, montant: x.montant, delai: x.delai })) });
+    } catch (e) { out.push({ k, erreur: String((e && e.message) || e).slice(0, 200) }); }
+    if (v && v.id) { try { const sp = await supprimer(v.id); if (!sp.supprime) out[out.length - 1].suppression = sp; } catch { out[out.length - 1].suppression = { supprime: false }; } }
+  }
+  return { ok: true, cas: out };
+}
+
+module.exports = { configure, etatPublic, etat, appel, creerNonPaye, supprimer, essaiTarifs, acheterCommande, essaiGrille, _test: { envoiCommande, choisirTarif, joursMax, DOUANE } };

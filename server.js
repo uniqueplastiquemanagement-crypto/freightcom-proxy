@@ -327,6 +327,12 @@ async function traiterRequete(req, res) {
   if (path === "/chitchats/etat" && req.method === "GET" && !estMagasinage) return send(200, await chitchats.etat());
   // Étape 2 : essai de tarifs US demandé par Alexandre (envoi non payé créé, tarifs lus, envoi supprimé ; jamais d'achat).
   if (path === "/chitchats/essai-tarifs" && req.method === "POST" && !estMagasinage) return send(200, await chitchats.essaiTarifs());
+  // Grille de tarifs par région (24 nov. 2026) : envois non payés créés puis supprimés, jamais d'achat. {"cas": [...]} (40 au plus).
+  if (path === "/chitchats/essai-grille" && req.method === "POST" && !estMagasinage) {
+    let corps = ""; for await (const morceau of req) { corps += morceau; if (corps.length > 20000) return send(413, { error: "corps trop gros" }); }
+    let cas = null; try { cas = JSON.parse(corps || "{}").cas; } catch { return send(400, { error: "JSON invalide" }); }
+    try { return send(200, await chitchats.essaiGrille(cas)); } catch (e) { return send(502, { error: "grille Chit Chats : " + String((e && e.message) || e).slice(0, 200) }); }
+  }
   // Étape 3 : essai SANS ACHAT sur une vraie commande hors Canada ({"no": "12345"}) : envoi non payé créé, tarif choisi, envoi supprimé.
   if (path === "/chitchats/essai-commande" && req.method === "POST" && !estMagasinage) {
     let corps = ""; for await (const morceau of req) { corps += morceau; if (corps.length > 2048) return send(413, { error: "corps trop gros" }); }
