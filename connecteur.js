@@ -36,7 +36,7 @@ const { M, erreurMoteur, SHOP, appShopify, shopify, REQ_COMMANDES, cpNorm, maint
 let PDFDocument = null;
 try { ({ PDFDocument } = require("pdf-lib")); } catch { /* signalé par l'outil etat */ }
 
-const VERSION = "1.5.2";
+const VERSION = "1.5.3";
 const PORT = process.env.PORT || 10000;
 const PROXY_KEY = process.env.PROXY_KEY || "";
 const ENV = (process.env.FREIGHTCOM_ENV || "test").toLowerCase();
@@ -617,6 +617,15 @@ function etatPublic() {
 // (ni achat, ni lecture d'envoi, ni connecteur). Les lots sont en mémoire : une passerelle redémarrée n'a plus rien à imprimer.
 const IMPRESSION_FENETRE_MS = 2 * 3600e3, IMPRESSION_EN_LIGNE_MS = 90e3;
 let impressionVu = 0;
+// 24 nov. 2026 (étiquettes sorties en double le 23 nov. : le programme tournait dans deux sessions Windows du PC ; Alexandre :
+// « ça doit fonctionner dans la session active seulement ») :
+//  - le programme 5.3 n'appelle la file que depuis la session Windows à l'écran et le dit (en-tête x-up-session: active). Tant
+//    qu'une session active a appelé depuis moins de 90 s, une copie qui ne le dit pas (5.2, session restée ouverte) reçoit une
+//    file vide. Sans programme 5.3 en marche, rien ne change pour les anciennes copies ;
+//  - un lot ou un document donné par la file est réservé 5 min à la copie qui l'a reçu (plus long qu'un bon sur une Brother
+//    lente : 4 min 30 au plus) : deux copies ne l'impriment jamais en même temps. Pas confirmé après 5 min (échec) : redonné.
+const IMPRESSION_PRISE_MS = 5 * 60e3, IMPRESSION_ACTIVE_MS = 90e3, RE_VERSION_PC = /^\d{1,2}(\.\d{1,2}){0,2}$/;
+let sessionActiveVue = 0, versionPc = null;
 function jetonImpression() {
   const e = (process.env.IMPRESSION_JETON || "").trim();
   if (e) return e.length >= 32 ? e : null;
@@ -676,7 +685,10 @@ async function recevoirDocument(args) {
   }
   return vueDoc(d);
 }
-function imprimanteUsine() { return { en_ligne: !!impressionVu && Date.now() - impressionVu < IMPRESSION_EN_LIGNE_MS, vu_a: impressionVu ? new Date(impressionVu).toISOString() : null }; }
+function imprimanteUsine() {
+  return { en_ligne: !!impressionVu && Date.now() - impressionVu < IMPRESSION_EN_LIGNE_MS, vu_a: impressionVu ? new Date(impressionVu).toISOString() : null,
+    session_active_vue_a: sessionActiveVue ? new Date(sessionActiveVue).toISOString() : null, programme: versionPc };
+}
 async function traiterImpression(req, res, chemin) {
   const fin = (code, obj) => { res.writeHead(code, { "content-type": "application/json", "cache-control": "no-store" }); res.end(JSON.stringify(obj)); };
   const jeton = jetonImpression();
@@ -685,9 +697,20 @@ async function traiterImpression(req, res, chemin) {
   impressionVu = Date.now();
   if (m[2]) {
     if (req.method !== "GET") return fin(405, { error: "GET seulement" });
-    const prets = [...lots.values()].filter((l) => l.statut !== "en_cours" && l.pdf && !l.imprime_usine && Date.now() - (Date.parse(l.fin_a) || 0) < IMPRESSION_FENETRE_MS)
-      .map((l) => ({ lot_id: l.lot_id, nom: l.nom_fichier || null, pages: l.pages, octets: l.pdf.length, sha256: l.sha, fin_a: l.fin_a }));
-    const documents = docsAImprimer().map((d) => ({ doc_id: d.doc_id, type: d.type, lot: d.lot || null, pages: d.pages || null, octets: d.html.length, sha256: d.sha, cree_a: d.cree_a }));
+    const t = Date.now();
+    if (String(req.headers["x-up-session"] || "").toLowerCase() === "active") {
+      sessionActiveVue = t;
+      const v = String(req.headers["x-up-version"] || "");
+      if (RE_VERSION_PC.test(v)) versionPc = v;
+    } else if (sessionActiveVue && t - sessionActiveVue < IMPRESSION_ACTIVE_MS) {
+      return fin(200, { lots: [], documents: [], pause: "une session Windows à l'écran imprime" });
+    }
+    const libre = (x) => !x.pris_a || t - x.pris_a >= IMPRESSION_PRISE_MS;
+    const lotsPrets = [...lots.values()].filter((l) => l.statut !== "en_cours" && l.pdf && !l.imprime_usine && t - (Date.parse(l.fin_a) || 0) < IMPRESSION_FENETRE_MS && libre(l));
+    const docsPrets = docsAImprimer().filter(libre);
+    for (const x of [...lotsPrets, ...docsPrets]) x.pris_a = t;
+    const prets = lotsPrets.map((l) => ({ lot_id: l.lot_id, nom: l.nom_fichier || null, pages: l.pages, octets: l.pdf.length, sha256: l.sha, fin_a: l.fin_a }));
+    const documents = docsPrets.map((d) => ({ doc_id: d.doc_id, type: d.type, lot: d.lot || null, pages: d.pages || null, octets: d.html.length, sha256: d.sha, cree_a: d.cree_a }));
     return fin(200, { lots: prets, documents });
   }
   if (m[5] || m[7]) {
