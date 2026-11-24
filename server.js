@@ -325,6 +325,8 @@ async function traiterRequete(req, res) {
   } else if (!egal(req.headers["x-proxy-key"] || "", PROXY_KEY)) return send(401, { error: "cle de passerelle invalide" });
   // Chit Chats (colis vers les États-Unis), étape 1 : la clé marche-t-elle ? Lecture seulement, rien de la clé n'est renvoyé.
   if (path === "/chitchats/etat" && req.method === "GET" && !estMagasinage) return send(200, await chitchats.etat());
+  // Étape 2 : essai de tarifs US demandé par Alexandre (envoi non payé créé, tarifs lus, envoi supprimé ; jamais d'achat).
+  if (path === "/chitchats/essai-tarifs" && req.method === "POST" && !estMagasinage) return send(200, await chitchats.essaiTarifs());
 
   const regle = ALLOW.find(r => r.m.includes(req.method) && r.re.test(path));
   if (!regle || !!regle.magasinage !== estMagasinage) return send(403, { error: "chemin ou methode non autorise", path, method: req.method });
