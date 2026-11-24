@@ -84,7 +84,7 @@ const ENVOI_ESSAI = {
   package_contents: "merchandise", description: "Plastic hair clip", value: "15.00", value_currency: "cad", order_id: "ESSAI-TARIFS",
   package_type: "parcel", size_unit: "in", size_x: 12, size_y: 9, size_z: 4, weight_unit: "lb", weight: 1, ship_date: "today",
   line_items: [{ quantity: 1, description: "Plastic hair clip (recycled plastic)", value_amount: "15.00", currency_code: "cad", weight: 1, weight_unit: "lb",
-    hs_tariff_code: "9615.11", origin_country: "CA" }],
+    hs_tariff_code: "9615114000", origin_country: "CA" }],   // HTSUS 9615.11.40.00 : barrettes et articles similaires en plastique, sans fausses perles ni pierres (Chit Chats exige 10 chiffres)
 };
 async function essaiTarifs() {
   if (!configure()) return { ok: false, raison: "Chit Chats pas configuré" };
