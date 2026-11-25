@@ -37,7 +37,7 @@ const { M, erreurMoteur, SHOP, appShopify, shopify, REQ_COMMANDES, cpNorm, maint
 let PDFDocument = null;
 try { ({ PDFDocument } = require("pdf-lib")); } catch { /* signalé par l'outil etat */ }
 
-const VERSION = "1.8.0";
+const VERSION = "1.8.1";
 const PORT = process.env.PORT || 10000;
 const PROXY_KEY = process.env.PROXY_KEY || "";
 const ENV = (process.env.FREIGHTCOM_ENV || "test").toLowerCase();
@@ -279,6 +279,8 @@ async function horsCanada(c, p, no, { essai = false, achatsPermis = false } = {}
   if (autres.length) return rien(autres.map((r) => r.texte).join(" ; "));
   if (!a.address1 || !a.city || !a.countryCodeV2) return rien("adresse incomplète (rue, ville ou pays)");
   if (a.countryCodeV2 === "US" && (!a.zip || !a.provinceCode)) return rien("adresse américaine incomplète (code ZIP ou État)");
+  // Allemagne (24 nov. 2026) : Chit Chats suspend depuis le 23 oct. les colis sans numéro IOSS ; zone Shopify UPS à 39,90 $, étiquette à la main.
+  if (a.countryCodeV2 === "DE") return rien("Allemagne : Chit Chats refuse les colis sans numéro IOSS ; étiquette UPS à acheter à la main dans Freightcom");
   if (!p.boite || !Array.isArray(p.colis) || p.colis.length !== 1) return rien("international en plusieurs boîtes : à faire à la main dans Chit Chats");
   if ((Number(p.nb_cannes) || 0) > 0 || (Number(p.presentoirs) || 0) > 0) return rien("international avec autre chose que des pinces (présentoir, cannes) : à faire à la main (douane)");
   if (!chitchats.configure()) return rien("Chit Chats pas configuré dans Render");
