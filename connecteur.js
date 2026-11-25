@@ -37,7 +37,7 @@ const { M, erreurMoteur, SHOP, appShopify, shopify, REQ_COMMANDES, cpNorm, maint
 let PDFDocument = null;
 try { ({ PDFDocument } = require("pdf-lib")); } catch { /* signalé par l'outil etat */ }
 
-const VERSION = "1.7.3";
+const VERSION = "1.8.0";
 const PORT = process.env.PORT || 10000;
 const PROXY_KEY = process.env.PROXY_KEY || "";
 const ENV = (process.env.FREIGHTCOM_ENV || "test").toLowerCase();
@@ -545,6 +545,10 @@ const OUTILS = [
     inputSchema: { type: "object", additionalProperties: false, properties: {
       documents: { type: "array", maxItems: 50, items: { type: "string", pattern: "^D\\d{8}-\\d{6}-[a-z0-9]{4}$" } },
       lots: { type: "array", maxItems: 50, items: { type: "string", pattern: "^L\\d{8}-\\d{6}-[a-z0-9]{4}$" } } } } },
+  // 1.8.0 (24 nov. 2026) : le bouton « Ramassage Canpar » du Poste lit le bac Chit Chats (l'API Chit Chats n'a pas de ramassage).
+  { name: "bac_chitchats", description: "Colis Chit Chats payés que Chit Chats n'a pas encore reçus (le bac de l'usine) : nombre, poids total, grande boîte suggérée pour le ramassage Canpar. Lecture seulement : ne réserve rien et n'achète rien.",
+    annotations: { title: "Bac Chit Chats", readOnlyHint: true, openWorldHint: true },
+    inputSchema: { type: "object", additionalProperties: false, properties: {} } },
   { name: "etat", description: "Réglages de la passerelle et du connecteur : environnement Freightcom, achats ouverts, garde-fou technique, app Shopify branchée, magasinage Shopify (dernière lecture, signaux), lot en cours.",
     annotations: { title: "État de la passerelle", readOnlyHint: true, openWorldHint: false },
     inputSchema: { type: "object", additionalProperties: false, properties: {} } },
@@ -560,6 +564,7 @@ async function appelerOutil(nom, args) {
       lot_en_cours: [...lots.values()].some((l) => l.statut === "en_cours"), impression_usine: imprimanteUsine(), documents_a_imprimer: docsAImprimer().length });
   }
   if (nom === "tarifs_shopify") return { commandes: magasinage.etatCommandes(args.commandes) };
+  if (nom === "bac_chitchats") return chitchats.bac();
   if (nom === "imprimer_document") return recevoirDocument(args);
   if (nom === "etat_impression") {
     // null = inconnu de la passerelle (redémarrée, ou plus de 2 h pour un document) : on ne saura plus s'il est sorti.

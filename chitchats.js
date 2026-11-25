@@ -264,4 +264,49 @@ async function essaiGrille(cas) {
   return { ok: true, cas: out };
 }
 
-module.exports = { configure, etatPublic, etat, appel, creerNonPaye, supprimer, essaiTarifs, acheterCommande, essaiGrille, _test: { envoiCommande, choisirTarif, joursMax, DOUANE } };
+// ---------- Bac Chit Chats (1.8.0) ----------
+// Alexandre, 24 nov. 2026 : un bouton de ramassage dans le Poste, « 1 fois par semaine max », réservé pour le vendredi.
+// L'API Chit Chats n'a aucun appel de ramassage (doc API v1 lue le 24 nov.) : il se réserve dans le site Chit Chats.
+// Ici, LECTURE SEULEMENT : les colis payés que Chit Chats n'a pas encore reçus (statut « ready »), pour que le Poste
+// donne le nombre de colis, le poids total et la grande boîte à entrer dans le formulaire de ramassage.
+const G_PAR = { g: 1, kg: 1000, oz: 28.349523125, lb: 453.59237 };
+const PO_PAR = { in: 1, cm: 1 / 2.54, m: 100 / 2.54 };
+let CARTONS = [];
+try { CARTONS = (require("./regle_boites.json").cartons || []).filter((c) => !c.manuel && c.longueur_po > 0 && c.largeur_po > 0 && c.hauteur_po > 0); } catch { CARTONS = []; }
+function vueColis(s) {
+  const g = Number(s.weight) * (G_PAR[String(s.weight_unit || "").toLowerCase()] || NaN);
+  const k = PO_PAR[String(s.size_unit || "").toLowerCase()] || NaN;
+  const d = [s.size_x, s.size_y, s.size_z].map((v) => Math.round(Number(v) * k * 10) / 10);
+  return { no: String(s.order_id || "").slice(0, 20), pays: String(s.country_code || "").slice(0, 2), poids_g: Number.isFinite(g) && g > 0 ? Math.round(g) : null,
+    boite: d.every((v) => v > 0 && v < 100) ? d : null, achete_le: String(s.created_at || "").slice(0, 10) || null };
+}
+// La plus petite grande boîte de la règle (sans les boîtes « manuelles ») qui contient tous les colis : volume ≥ 1,25 fois leur volume
+// et chaque côté ≥ le plus grand côté d'un colis. Aucune assez grande : la plus grande, avec une note.
+function grandeBoite(colis) {
+  const cotes = (b) => [...b].sort((a, z) => z - a);
+  const vol = colis.reduce((t, c) => t + (c.boite ? c.boite[0] * c.boite[1] * c.boite[2] : 9 * 6 * 2), 0);
+  const max = colis.reduce((m, c) => { const s = cotes(c.boite || [9, 6, 2]); return [Math.max(m[0], s[0]), Math.max(m[1], s[1]), Math.max(m[2], s[2])]; }, [0, 0, 0]);
+  const tri = CARTONS.map((c) => ({ nom: c.nom, cotes: cotes([c.longueur_po, c.largeur_po, c.hauteur_po]), poids_vide_g: Number(c.poids_vide_g) || 300 }))
+    .map((c) => Object.assign(c, { volume: c.cotes[0] * c.cotes[1] * c.cotes[2] })).sort((a, b) => a.volume - b.volume);
+  const ok = tri.find((c) => c.volume >= vol * 1.25 && c.cotes.every((v, i) => v >= max[i]));
+  const b = ok || tri[tri.length - 1];
+  return b ? { nom: b.nom, longueur_po: b.cotes[0], largeur_po: b.cotes[1], hauteur_po: b.cotes[2], poids_vide_g: b.poids_vide_g, note: ok ? null : "les colis ne tiennent pas dans une seule boîte de la règle : en faire deux (« Add another piece » dans Chit Chats)" } : null;
+}
+async function bac() {
+  if (!configure()) return { configure: false, colis: 0, envois: [] };
+  const envois = [];
+  for (let page = 1; page <= 5; page++) {
+    const r = await appel("GET", `/shipments?status=ready&limit=100&page=${page}`);
+    if (r.status !== 200) throw new Error(`lecture des envois Chit Chats impossible (${r.status})`);
+    const l = listeEnvois(r.json);
+    for (const s of l) if (String(s.status) === "ready" && !/^ESSAI/i.test(String(s.order_id || ""))) envois.push(vueColis(s));
+    if (l.length < 100) break;
+  }
+  const b = envois.length ? grandeBoite(envois) : null;
+  const g = envois.reduce((t, c) => t + (c.poids_g || 100), 0) + (b ? b.poids_vide_g : 0);
+  return { configure: true, colis: envois.length, envois: envois.slice(0, 200), grande_boite: b,
+    poids_total_g: envois.length ? Math.round(g) : 0, poids_total_lb: envois.length ? Math.ceil((g / 453.59237) * 10) / 10 : 0,
+    plus_ancien: envois.map((c) => c.achete_le).filter(Boolean).sort()[0] || null, lu_a: new Date().toISOString() };
+}
+
+module.exports = { configure, etatPublic, etat, appel, creerNonPaye, supprimer, essaiTarifs, acheterCommande, essaiGrille, bac, _test: { envoiCommande, choisirTarif, joursMax, DOUANE, vueColis, grandeBoite } };
