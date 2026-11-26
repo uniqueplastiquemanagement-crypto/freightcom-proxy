@@ -37,7 +37,7 @@ const { M, erreurMoteur, SHOP, appShopify, shopify, REQ_COMMANDES, cpNorm, maint
 let PDFDocument = null;
 try { ({ PDFDocument } = require("pdf-lib")); } catch { /* signalé par l'outil etat */ }
 
-const VERSION = "1.8.1";
+const VERSION = "1.9.0";
 const PORT = process.env.PORT || 10000;
 const PROXY_KEY = process.env.PROXY_KEY || "";
 const ENV = (process.env.FREIGHTCOM_ENV || "test").toLowerCase();
@@ -286,10 +286,13 @@ async function horsCanada(c, p, no, { essai = false, achatsPermis = false } = {}
   if (!chitchats.configure()) return rien("Chit Chats pas configuré dans Render");
   let valeur = null;
   try {
-    const d = await shopify("query($id: ID!) { order(id: $id) { currentSubtotalPriceSet { shopMoney { amount currencyCode } } } }", { id: c.id });
+    const d = await shopify("query($id: ID!) { order(id: $id) { currentSubtotalPriceSet { shopMoney { amount currencyCode } } lineItems(first: 50) { nodes { originalTotalSet { shopMoney { amount currencyCode } } } } } }", { id: c.id });
     const m = d && d.order && d.order.currentSubtotalPriceSet && d.order.currentSubtotalPriceSet.shopMoney;
     if (!m || String(m.currencyCode || "CAD").toUpperCase() !== "CAD") throw new Error("devise");
     valeur = Number(m.amount);
+    // Commande provisoire à 0 $ (remplacement, cadeau ; 25 nov. 2026) : la douane prend le prix courant des articles, avant le rabais.
+    if (!(valeur > 0)) valeur = ((d.order.lineItems && d.order.lineItems.nodes) || []).reduce((t, l) => { const x = l.originalTotalSet && l.originalTotalSet.shopMoney; return t + (x && String(x.currencyCode || "CAD").toUpperCase() === "CAD" ? Number(x.amount) || 0 : 0); }, 0);
+    if (!(valeur > 0)) return erreur("valeur de la commande à 0 $ dans Shopify (douane) : à faire à la main dans Chit Chats");
   } catch (e) { return erreur("valeur de la commande illisible dans Shopify (douane) : rien n'est acheté"); }
   const base = { plateforme: "chitchats", boite: p.boite.nom, poids_lb: p.poids_lb, boite_choisie: !!p.boite_choisie, pays: a.countryCodeV2 };
   try {
@@ -548,6 +551,18 @@ const OUTILS = [
       documents: { type: "array", maxItems: 50, items: { type: "string", pattern: "^D\\d{8}-\\d{6}-[a-z0-9]{4}$" } },
       lots: { type: "array", maxItems: 50, items: { type: "string", pattern: "^L\\d{8}-\\d{6}-[a-z0-9]{4}$" } } } } },
   // 1.8.0 (24 nov. 2026) : le bouton « Ramassage Canpar » du Poste lit le bac Chit Chats (l'API Chit Chats n'a pas de ramassage).
+  // 1.9.0 (25 nov. 2026, Alexandre : « le call pour gls ne fonctionne pas ») : le bouton « Ramassage GLS / UPS » du Poste réserve
+  // vraiment le camion chez Freightcom, sur un envoi du même transporteur acheté par la passerelle. Mêmes verrous que la route
+  // POST /shipment/<id>/schedule (RAMASSAGES_ACTIVES=oui sur Render, un ramassage par transporteur et par jour, 7 h-19 h).
+  { name: "reserver_ramassage", description: "Réserve un ramassage UPS ou GLS chez Freightcom pour l'usine (porte de côté), sur un envoi Freightcom du même transporteur. Vrai camion : seulement sur demande du Poste ou d'Alexandre. Refusé si RAMASSAGES_ACTIVES n'est pas « oui » sur Render.",
+    annotations: { title: "Réserver un ramassage", readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+    inputSchema: { type: "object", additionalProperties: false, required: ["transporteur", "date", "de", "a", "shipment_id"], properties: {
+      transporteur: { type: "string", enum: ["ups", "gls"] }, date: { type: "string", pattern: "^\\d{4}-\\d{2}-\\d{2}$" },
+      de: { type: "string", pattern: "^\\d{2}:\\d{2}$" }, a: { type: "string", pattern: "^\\d{2}:\\d{2}$" },
+      shipment_id: { type: "string", pattern: "^[A-Za-z0-9_-]{6,80}$" }, colis: { type: "integer", minimum: 1, maximum: 999 }, employe: { type: "string", maxLength: 40 } } } },
+  { name: "etat_ramassage", description: "Lit chez Freightcom l'envoi sur lequel un ramassage a été réservé : état et numéro de confirmation du ramassage. Lecture seulement.",
+    annotations: { title: "État d'un ramassage", readOnlyHint: true, openWorldHint: true },
+    inputSchema: { type: "object", additionalProperties: false, required: ["shipment_id"], properties: { shipment_id: { type: "string", pattern: "^[A-Za-z0-9_-]{6,80}$" } } } },
   { name: "bac_chitchats", description: "Colis Chit Chats payés que Chit Chats n'a pas encore reçus (le bac de l'usine) : nombre, poids total, grande boîte suggérée pour le ramassage Canpar. Lecture seulement : ne réserve rien et n'achète rien.",
     annotations: { title: "Bac Chit Chats", readOnlyHint: true, openWorldHint: true },
     inputSchema: { type: "object", additionalProperties: false, properties: {} } },
@@ -555,6 +570,42 @@ const OUTILS = [
     annotations: { title: "État de la passerelle", readOnlyHint: true, openWorldHint: false },
     inputSchema: { type: "object", additionalProperties: false, properties: {} } },
 ];
+
+// ---------- Ramassages UPS / GLS (1.9.0) ----------
+const RAM_ENDROIT = { pickup_location: "side-door", note: "Porte de côté, colis en dessous de l'escalier / Side door, parcels under the stairs" };
+const RAM_CONTACT = { nom: "Alexandre Tanguay", tel: "5815805182" };
+const transporteurDe = (s) => { const n = String((s && s.rate && s.rate.carrier_name) || (s && s.carrier_name) || "").toLowerCase(); return /\bgls\b|dicom/.test(n) ? "gls" : /\bups\b/.test(n) ? "ups" : n || null; };
+async function lireEnvoi(sid) {
+  if (!/^[A-Za-z0-9_-]{6,80}$/.test(sid)) throw new Error("numéro d'envoi Freightcom invalide");
+  const r = await passerelle("GET", `/shipment/${sid}`);
+  if (r.status === 404) throw new Error("envoi Freightcom introuvable");
+  if (r.status !== 200 || !r.json) throw new Error(`lecture de l'envoi refusée (${r.status})`);
+  return r.json.shipment || r.json;
+}
+async function lireRamassage(sid) {
+  const s = await lireEnvoi(sid);
+  const conf = String(s.pickup_confirmation_number || "").trim();
+  return { shipment_id: sid, transporteur: transporteurDe(s), etat: String(s.state || ""), confirmation: conf || null, confirme: !!conf };
+}
+async function reserverRamassage(args) {
+  const t = String(args.transporteur || ""), date = String(args.date || ""), de = String(args.de || ""), a = String(args.a || ""), sid = String(args.shipment_id || "");
+  if (!/^(ups|gls)$/.test(t) || !/^\d{4}-\d{2}-\d{2}$/.test(date) || !/^\d{2}:\d{2}$/.test(de) || !/^\d{2}:\d{2}$/.test(a)) throw new Error("transporteur, date ou heures invalides");
+  const s = await lireEnvoi(sid);
+  if (transporteurDe(s) !== t) throw new Error(`l'envoi ${sid} n'est pas un envoi ${t.toUpperCase()} (${transporteurDe(s) || "transporteur inconnu"})`);
+  if (/cancel|void/i.test(String(s.state || ""))) throw new Error("envoi annulé chez Freightcom : choisir un autre envoi");
+  const [y, m, d] = date.split("-").map(Number), [h1, m1] = de.split(":").map(Number), [h2, m2] = a.split(":").map(Number);
+  const qui = String(args.employe || "").replace(/[^\p{L}\p{N} '.-]/gu, "").slice(0, 40);
+  const corps = { pickup_details: { pre_scheduled_pickup: false, date: { year: y, month: m, day: d }, ready_at: { hour: h1, minute: m1 }, ready_until: { hour: h2, minute: m2 },
+    pickup_location: RAM_ENDROIT.pickup_location, contact_name: "Unique Plastique — " + (qui || RAM_CONTACT.nom), contact_phone_number: { number: RAM_CONTACT.tel, extension: "" } } };
+  const cle = `RAM-${date}-${t}`;
+  const r = await passerelle("POST", `/shipment/${sid}/schedule`, { corps, entetes: { "x-cle-ramassage": cle } });
+  const msg = (r.json && (r.json.error || r.json.message)) || String(r.texte || "").slice(0, 200);
+  journal(`ramassage ${t.toUpperCase()} ${date} ${de}-${a} sur ${sid} -> ${r.status}`);
+  if (r.status === 409) return { statut: "deja_reserve", cle, raison: "un ramassage " + t.toUpperCase() + " est déjà réservé pour ce jour-là" };
+  if (r.status < 200 || r.status >= 300) return { statut: "refuse", cle, code: r.status, raison: String(msg || "refus de Freightcom").slice(0, 240) };
+  let etat = null; try { etat = await lireRamassage(sid); } catch { /* lu plus tard par etat_ramassage */ }
+  return { statut: etat && etat.confirme ? "confirme" : "demande", cle, shipment_id: sid, confirmation: etat && etat.confirmation, etat: etat && etat.etat, note: RAM_ENDROIT.note, colis: args.colis || null };
+}
 
 async function appelerOutil(nom, args) {
   args = args && typeof args === "object" ? args : {};
@@ -567,6 +618,8 @@ async function appelerOutil(nom, args) {
   }
   if (nom === "tarifs_shopify") return { commandes: magasinage.etatCommandes(args.commandes) };
   if (nom === "bac_chitchats") return chitchats.bac();
+  if (nom === "etat_ramassage") return lireRamassage(String(args.shipment_id || ""));
+  if (nom === "reserver_ramassage") return reserverRamassage(args || {});
   if (nom === "imprimer_document") return recevoirDocument(args);
   if (nom === "etat_impression") {
     // null = inconnu de la passerelle (redémarrée, ou plus de 2 h pour un document) : on ne saura plus s'il est sorti.

@@ -403,10 +403,9 @@ function planCommande(c, regle) {
     if (champ) raisons.push(R("ADRESSE_SUSPECTE", `adresse inhabituelle (champ ${champ}) : à vérifier à la main, rien n'est saisi`));
   }
   const sl = ((c.shippingLines && c.shippingLines.nodes) || []).map(s => norm(s.title));
-  if (!sl.length || sl.some(t => /personnalis|custom/.test(t))) {
-    if (estB2B) notes.push("B2B : aucun mode de livraison ou livraison personnalisée (commande créée à la main) : cotée quand même");
-    else raisons.push(R("BROUILLON", "commande brouillon ou mode de livraison personnalisé"));
-  }
+  // Commande provisoire (créée à la main dans Shopify) ou livraison personnalisée : traitée comme les autres, B2C compris
+  // (Alexandre, 25 nov. 2026 : « tenir compte des commandes provisoires »). La cueillette reste reconnue juste en dessous.
+  if (!sl.length || sl.some(t => /personnalis|custom/.test(t))) notes.push((estB2B ? "B2B" : "B2C") + " : commande provisoire ou livraison personnalisée (créée à la main) : cotée et étiquetée comme les autres");
   if (sl.some(t => /cueillette|ramassage|pick ?up|retrait|livraison locale|local delivery/.test(t))) raisons.push(R("CUEILLETTE", "cueillette ou livraison locale"));
   const express = sl.some(t => /express|xpresspost|prioritaire|priority/.test(t));
   if (express) notes.push("le client a payé un service rapide : seulement les services de 2 jours ou moins");
