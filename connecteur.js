@@ -37,7 +37,7 @@ const { M, erreurMoteur, SHOP, appShopify, shopify, REQ_COMMANDES, cpNorm, maint
 let PDFDocument = null;
 try { ({ PDFDocument } = require("pdf-lib")); } catch { /* signalé par l'outil etat */ }
 
-const VERSION = "1.9.0";
+const VERSION = "1.9.1";
 const PORT = process.env.PORT || 10000;
 const PROXY_KEY = process.env.PROXY_KEY || "";
 const ENV = (process.env.FREIGHTCOM_ENV || "test").toLowerCase();
@@ -357,7 +357,9 @@ async function traiterLot(l, regle) {
       if (/ne\s+pas\s+exp[ée]di/i.test(String(c.note || ""))) { l.resultats[no] = rien("la note de la commande dit de ne pas expédier"); continue; }
       // Hors Canada (Alexandre, 24 nov. 2026) : étiquette Chit Chats (États-Unis et reste du monde), jamais Freightcom.
       if ((p.raisons || []).some((r) => r.code === "HORS_CANADA")) {
-        const r = await horsCanada(c, p, no, { achatsPermis: rUn.achats_permis === true });
+        // Le lot lancé du bouton du Poste est l'autorisation d'achat, comme au Canada (qui ne lit pas achats_permis). La règle des boîtes
+        // garde achats_permis: false depuis le 23 oct. : l'exiger ici sautait toutes les commandes (« mode essai », 25 nov. 2026, 22 h 30).
+        const r = await horsCanada(c, p, no, { achatsPermis: true });
         const pdf = r.pdf; delete r.pdf;
         if (pdf) { l.pdfs.push(pdf); r.pages = await pagesPdf(pdf); }
         else if (r.statut === "achete" || r.statut === "deja_achete") r.raison = (r.raison ? r.raison + " ; " : "") + "étiquette achetée mais PDF non récupéré";
