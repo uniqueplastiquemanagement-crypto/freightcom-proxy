@@ -135,7 +135,10 @@ function envoiCommande(cmd) {
     package_type: "parcel", size_unit: "in", size_x: Number(c.longueur_po), size_y: Number(c.largeur_po), size_z: Number(c.hauteur_po),
     weight_unit: "g", weight: g, ship_date: "today",
     line_items: [Object.assign({ quantity: q, description: DOUANE.description, value_amount: (total / q).toFixed(2), currency_code: "cad",
-      weight: Math.max(1, Math.floor(g / q)), weight_unit: "g", hs_tariff_code: DOUANE.hs, origin_country: DOUANE.origine, sku_code: "UP-PINCE" }, FABRICANT)],
+      weight: Math.max(1, Math.floor(g / q)), weight_unit: "g", hs_tariff_code: DOUANE.hs, origin_country: DOUANE.origine, sku_code: "UP-PINCE",
+      // Union européenne : Chit Chats refuse l'achat sans le numéro de modèle du fabricant (« Manufacturer product / model ID is required
+      // for EU shipments », #12887 et #12918, 27 nov. 2026). Le fabricant, c'est nous : notre modèle de pince = UP-PINCE.
+      manufacturer_internal_id: "UP-PINCE" }, FABRICANT)],
   };
   const a2 = [entreprise && entreprise !== e.name ? entreprise : "", net(a.address2)].filter(Boolean).join(", ").slice(0, 60);
   if (a2) e.address_2 = a2;
